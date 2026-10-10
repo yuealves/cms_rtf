@@ -5,7 +5,12 @@
 `index_500ms/<YYYYMMDD>/index_500ms_exch.arrow`（Arrow IPC stream：
 datetime[us 北京墙钟] + code + 106×Float32，NaN→null）。
 
-语义基准：light_rtf v2 的 index_500ms family（见 `docs/design/`）。本项目是它的
+- **操作入口（跑一天/对拍/测试/故障排查）**：[docs/how-to.md](docs/how-to.md)
+- 设计（批处理架构与口径移植边界）：[docs/design.md](docs/design.md)
+- 验证记录：[docs/validation/](docs/validation/)
+- AI 协作入口：[AGENTS.md](AGENTS.md)
+
+语义基准：light_rtf v2 的 index_500ms family。本项目是它的
 **CMS 数据源批处理移植**：同一套 106 列定义、同一套簿/流量/聚合语义，但
 - 只有交易所网格（local 网格不实现——不同采集机的接收时间本来也不可比）；
 - 批量处理全天，无实时水位/关窗逻辑（全量历史 ⇒ 28,800 端点全发布）。

@@ -5,7 +5,7 @@
 招商逐笔行情（/data/tickl2_data_cms）的指数 500ms 因子离线批处理。
 语义基准 = light_rtf v2 的 index_500ms family（移植其簿内核/流量状态机/聚合），
 **不要把语义"创新"带进来**——任何口径改动必须先对照 light_rtf 源文件并更新
-docs/design/index_500ms-batch.md 的差异清单。
+docs/design.md 的差异清单。
 
 ## 硬性红线
 
