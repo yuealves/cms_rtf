@@ -16,3 +16,5 @@
   CMS parquet 字段 → canonical 事件映射的逐条实证（含分片时间范围陷阱）。
 - [validation/20261009-compare-results.md](validation/20261009-compare-results.md)：
   全天对拍 ht_idc 参考的分组统计与两个例外列的定性。
+- [validation/20261012-v2-rollout.md](validation/20261012-v2-rollout.md)：
+  v2 格式落地验证（格式透明性、回放 roundtrip、过程缺陷）。
