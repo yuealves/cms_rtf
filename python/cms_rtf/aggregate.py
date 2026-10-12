@@ -86,6 +86,9 @@ def rolling_sum_session(agg21_f32, grid):
 
 
 def aggregate(book_path, flow_path, seeds_path, ref, day):
+    book_path = [book_path] if isinstance(book_path, (str, Path)) else list(book_path)
+    flow_path = [flow_path] if isinstance(flow_path, (str, Path)) else list(flow_path)
+    seeds_path = [seeds_path] if isinstance(seeds_path, (str, Path)) else list(seeds_path)
     """返回 (datetimes_us[28800], rows[4][28800, 106] float32)。"""
     grid = endpoint_schedule_ms()
     n_ep = len(grid)
@@ -106,16 +109,30 @@ def aggregate(book_path, flow_path, seeds_path, ref, day):
         if entries:
             sym_idx[int(s)] = entries
 
-    seeds_arr = np.fromfile(seeds_path, dtype=SEED_REC)
-    seeds = dict(zip(seeds_arr['symbol'].astype(np.int32), seeds_arr['seed_mid']))
+    seeds = {}
+    for sp in seeds_path:
+        seeds_arr = np.fromfile(sp, dtype=SEED_REC)
+        for s, m in zip(seeds_arr['symbol'].astype(np.int32), seeds_arr['seed_mid']):
+            seeds[s] = m
 
-    book = np.memmap(book_path, dtype=BOOK_REC, mode='r')
-    flow = (np.memmap(flow_path, dtype=FLOW_REC, mode='r')
-            if Path(flow_path).stat().st_size else np.zeros(0, dtype=FLOW_REC))
+    def read_recs(paths, dtype):
+        parts = []
+        for p in paths:
+            if Path(p).stat().st_size:
+                parts.append(np.memmap(p, dtype=dtype, mode='r'))
+        if not parts:
+            return np.zeros(0, dtype=dtype)
+        if len(parts) == 1:
+            return parts[0]
+        return np.concatenate(parts)
+
+    book = read_recs(book_path, BOOK_REC)
+    flow = read_recs(flow_path, FLOW_REC)
 
     # ---- 簿：逐股展开到端点网格 ----
     bounds = np.flatnonzero(np.r_[True, book['symbol'][1:] != book['symbol'][:-1], True])
-    for lo, hi in zip(bounds[:-1], bounds[1:]):
+    groups = sorted(zip(book['symbol'][bounds[:-1]], bounds[:-1], bounds[1:]))
+    for _, lo, hi in groups:
         recs = book[lo:hi]
         sym = int(recs['symbol'][0])
         entries = sym_idx.get(sym)
@@ -147,8 +164,12 @@ def aggregate(book_path, flow_path, seeds_path, ref, day):
             fresh_w[i] += w * (age_ok & (age < 0.5))
 
     # ---- 流量：逐股散布进指数 ----
-    fbounds = np.flatnonzero(np.r_[True, flow['symbol'][1:] != flow['symbol'][:-1], True])
-    for lo, hi in zip(fbounds[:-1], fbounds[1:]):
+    if len(flow):
+        fbounds = np.flatnonzero(np.r_[True, flow['symbol'][1:] != flow['symbol'][:-1], True])
+        fgroups = sorted(zip(flow['symbol'][fbounds[:-1]], fbounds[:-1], fbounds[1:]))
+    else:
+        fgroups = []
+    for _, lo, hi in fgroups:
         recs = flow[lo:hi]
         if not len(recs):
             continue

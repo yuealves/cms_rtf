@@ -16,6 +16,9 @@ target_include_directories(cms_rtf_core PUBLIC include)
 add_executable(cms_index500ms_day app/main_day.cpp)
 target_link_libraries(cms_index500ms_day PRIVATE cms_rtf_core)
 
+add_executable(cms_index500ms_mt app/cms_index500ms_mt.cpp)
+target_link_libraries(cms_index500ms_mt PRIVATE cms_rtf_core)
+
 enable_testing()
 add_executable(test_book tests/cpp/test_book.cpp)
 target_link_libraries(test_book PRIVATE cms_rtf_core)
