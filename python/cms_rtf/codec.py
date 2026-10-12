@@ -144,23 +144,31 @@ def _trade_events(t, constituents):
 
 
 def write_events(data_root, day, constituents, out_events, out_thresh, dyn):
-    """扫描当天 parquet，写 events.bin（按 symbol 分组、组内 journal 序）与 thresh.bin。"""
+    """扫描当天 parquet，写 events.bin（按 symbol 分组、组内 journal 序）与 thresh.bin。
+
+    自动按分片 schema 分派 v1/v2（v2 = KyStd 兼容列，见 codec_v2）。"""
+    from .codec_v2 import detect_schema_version, read_day_events_v2
     constituents = np.asarray(constituents, dtype=np.int32)
     day_dir = Path(data_root) / day
-    order_shards = sorted(day_dir.glob(f'{day}_order_data_*.parquet'))
-    trade_shards = sorted(day_dir.glob(f'{day}_trade_data_*.parquet'))
-    if not order_shards or not trade_shards:
-        raise RuntimeError(f'no parquet shards under {day_dir}')
-
-    parts = []
-    for shard in order_shards:
-        part = _order_events(pq.read_table(shard, columns=_ORDER_COLS), constituents)
-        if part is not None:
-            parts.append(part)
-    for shard in trade_shards:
-        part = _trade_events(pq.read_table(shard, columns=_TRADE_COLS), constituents)
-        if part is not None:
-            parts.append(part)
+    schema = detect_schema_version(day_dir)
+    if schema == 'cms-parquet-v2':
+        parts = read_day_events_v2(data_root, day, constituents)
+        n_shards = len(list(day_dir.glob(f'{day}_*_data_*.parquet')))
+    else:
+        order_shards = sorted(day_dir.glob(f'{day}_order_data_*.parquet'))
+        trade_shards = sorted(day_dir.glob(f'{day}_trade_data_*.parquet'))
+        if not order_shards or not trade_shards:
+            raise RuntimeError(f'no parquet shards under {day_dir}')
+        parts = []
+        for shard in order_shards:
+            part = _order_events(pq.read_table(shard, columns=_ORDER_COLS), constituents)
+            if part is not None:
+                parts.append(part)
+        for shard in trade_shards:
+            part = _trade_events(pq.read_table(shard, columns=_TRADE_COLS), constituents)
+            if part is not None:
+                parts.append(part)
+        n_shards = len(order_shards) + len(trade_shards)
 
     n = sum(len(p['symbol']) for p in parts)
     events = np.zeros(n, dtype=EVENT_DTYPE)
@@ -177,5 +185,5 @@ def write_events(data_root, day, constituents, out_events, out_thresh, dyn):
     for i, s in enumerate(constituents):
         thresh[i] = (s, dyn[int(s)][1], dyn[int(s)][2])
     thresh.tofile(out_thresh)
-    return dict(events=int(n), symbols=int(len(constituents)),
-                shards=len(order_shards) + len(trade_shards))
+    return dict(events=int(n), symbols=int(len(constituents)), shards=n_shards,
+                schema=schema)
