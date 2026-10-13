@@ -54,6 +54,12 @@ python3 scripts/push_online.py --build-tools work/build-tools-ubuntu24-gcc13.tar
 真实版本路径；不使用 gy_dev 的 Arrow 11 二进制或其旧 ABI 编译选项。
 旧归档 release 的这个目录是已发布 cms_rtf 的依赖，不能随意删除。
 
+目标机可访问 Ubuntu 镜像时，也可在目标机执行
+`python3 scripts/bootstrap_build_tools.py --prefix /data/cms/rtf --refresh-metadata`。
+它将 APT 元数据保存在自己的 incoming 目录，校验官方包 hash 后仅用
+`dpkg-deb -x` 解包到私有工具目录；不运行 apt install/dpkg -i，也不修改系统
+APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap。
+
 ## 参考数据及运行
 
 `config/live.json` 默认 8 workers，待聚合 payload 上限 256 MiB。每日启动前将

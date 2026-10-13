@@ -179,12 +179,13 @@ class LiveJournalTest(unittest.TestCase):
         self.wait_status(out, lambda x: x['emitted_endpoints'] == 2)
         first = pa.ipc.open_stream(out / 'factors.arrow').read_all()
         self.writer.append(1, 34203000, order(4, 34200200, volume=999999))
+        self.writer.append(1, 34203001, order(40, 34200200, symbol=b'000002'))
         self.writer.append(3, 41459999)
-        self.wait_status(out, lambda x: x['records'] == 7)
+        self.wait_status(out, lambda x: x['records'] == 8)
         self.assertEqual(pa.ipc.open_stream(out / 'factors.arrow').read_all().num_rows, 8)
         self.writer.append(3, 41460000)
         am = self.wait_status(out, lambda x: x['emitted_endpoints'] == 14400)
-        self.assertEqual(am['late_events'], 1)
+        self.assertEqual(am['late_events'], 2)
         self.assertTrue(pa.ipc.open_stream(out / 'factors.arrow').read_all().slice(0, 8).equals(first))
         self.writer.append(1, 46800100, order(5, 46800100))
         self.writer.append(3, 54060000)
@@ -226,6 +227,42 @@ class LiveJournalTest(unittest.TestCase):
         result = subprocess.run(cmd, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((out / 'factors.arrow').read_bytes(), b'accepted')
+
+    def test_missing_intermediate_page_is_not_a_successful_end(self):
+        self.opening(); self.writer.append(4, 55800000); self.writer.close_page()
+        self.writer.new_page()
+        self.writer.path.rename(self.writer.directory / 'yjj.cms_l2_raw_v1.3.journal')
+        out = self.root / 'page_gap'
+        result = subprocess.run(self.command(out, 'replay'), capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'missing journal page', result.stderr)
+
+    def test_direct_journal_matches_existing_dtype_replay_without_late_events(self):
+        from cms_rtf.journal_events import JOURNAL_DTYPE
+        self.opening()
+        self.writer.append(3, 41460000)
+        self.writer.append(1, 46800100, order(5, 46800100))
+        self.writer.append(3, 54060000); self.writer.append(4, 55800000)
+        rows = np.zeros(4, dtype=JOURNAL_DTYPE)
+        rows['market'] = 2; rows['message_type'] = 23; rows['symbol'] = b'000001'
+        rows['action_code'] = ord('A'); rows['value_raw'] = 50; rows['channel'] = 1
+        rows['business_seq'] = [1, 2, 3, 5]; rows['side_raw'] = [49, 50, 49, 49]
+        rows['buy_ref'] = [1, 0, 3, 5]; rows['sell_ref'] = [0, 2, 0, 0]
+        rows['price_raw'] = [100000, 100100, 100000, 100000]; rows['quantity_raw'] = 10000
+        rows['exchange_time_raw'] = [20261009092959100, 20261009092959200,
+                                     20261009093001100, 20261009130000100]
+        dtype = self.root / 'dtype.bin'; dtype.write_bytes(b'CMSPQ01\0' + rows.tobytes())
+        baseline = self.root / 'dtype'; baseline.mkdir()
+        subprocess.run([str(self.kernel), '--input', str(dtype), '--thresh', str(self.root / 'thresh'),
+                        '--ref', str(self.root / 'ref'), '--day', DAY, '--output-mode', 'stream',
+                        '--work-dir', str(baseline), '--out', str(baseline / 'factors.arrow')],
+                       check=True, capture_output=True, timeout=20)
+        dest = self.root / 'direct'
+        result = subprocess.run(self.command(dest, 'replay'), capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        check = exact_factors(pa.ipc.open_stream(baseline / 'factors.arrow').read_all(),
+                              pa.ipc.open_stream(dest / 'factors.arrow').read_all())
+        self.assertTrue(check['keys_equal']); self.assertEqual(check['exact_columns'], 106)
 
 
 if __name__ == '__main__':
