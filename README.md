@@ -3,8 +3,8 @@
 招商（CMS）逐笔行情的**指数 500ms 因子**实时计算与离线批处理。实时入口直接跟读
 gateway 正在写入的 `cms_l2_raw_v1` journal。离线入口输入 `/data/tickl2_data_cms/<YYYYMMDD>/`
 的 order/trade parquet 分片（archive_journal 产物），输出与线上 light_rtf v2 同口径的
-`index_500ms/<YYYYMMDD>/index_500ms_exch.arrow`（Arrow IPC stream：
-datetime[us 北京墙钟] + code + 106×Float32，NaN→null）。
+`index_500ms_exch.arrow`；journal 实盘/回放同时输出 `index_500ms_local.arrow`。
+两路为 Arrow IPC stream：datetime[us 北京墙钟] + code + 106×Float32，NaN/Inf→null。
 
 - **操作入口（跑一天/对拍/测试/故障排查）**：[docs/how-to.md](docs/how-to.md)
 - **招商机源码部署与实时运行**：[docs/deploy-live.md](docs/deploy-live.md)
@@ -14,9 +14,11 @@ datetime[us 北京墙钟] + code + 106×Float32，NaN→null）。
 
 语义基准：light_rtf v2 的 index_500ms family。本项目是它的
 **CMS 数据源移植**：同一套 106 列定义、同一套簿/流量/聚合语义，但
-- 只有交易所网格（local 网格不实现——不同采集机的接收时间本来也不可比）；
+- journal 双网格按华泰接收时钟 cutoff、严格通道水位和 11:31/15:01 会话兜底关窗；
+  同目录 `latency.log` 每次 cutoff 一条，统计关窗触发至 local/exch 两路 Flush 完成的毫秒数；
 - `--journal` 支持实时跟随、会话定时器与直接 Arrow 发布；`--journal-mode replay`
-  使用原始记录时钟复现该路径。原 DTYPE replay 接口仍在 EOF 补齐全天端点。
+  使用原始记录时钟复现该路径。EOF 按华泰补 local 的普通 cutoff，不人为推进 exch 水位。
+  原 parquet/DTYPE 离线接口保留 exch-only 对照及其 EOF 补齐契约。
 
 ## 架构
 

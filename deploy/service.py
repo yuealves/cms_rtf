@@ -96,7 +96,8 @@ def run_service(prefix, day):
                '--thresh', str(attempt / 'thresholds.bin'), '--ref', str(attempt / 'reference.bin'),
                '--work-dir', str(attempt), '--output-mode', 'stream', '--window-batch', '1',
                '--workers', str(config['workers']), '--pending-mib', str(config['pending_mib']),
-               '--out', str(attempt / 'index_500ms_exch.arrow')]
+               '--out', str(attempt / 'index_500ms_exch.arrow'),
+               '--local-out', str(attempt / 'index_500ms_local.arrow')]
         with (attempt / 'kernel.log').open('wb') as err, (attempt / 'kernel.summary.json').open('wb') as out:
             child = subprocess.Popen(cmd, stdout=out, stderr=err)
             def stop(signum, frame):

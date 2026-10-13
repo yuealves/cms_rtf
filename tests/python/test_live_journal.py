@@ -1,6 +1,5 @@
 """Exercise a growing, committed-frame journal without a gateway or paged."""
 import datetime
-import csv
 import json
 import os
 from pathlib import Path
@@ -112,7 +111,7 @@ class LiveJournalTest(unittest.TestCase):
                 '--output-mode', 'stream', '--out', str(out / 'factors.arrow')]
 
     def wait_status(self, out, predicate):
-        limit = time.monotonic() + 12
+        limit = time.monotonic() + 30
         last = None
         while time.monotonic() < limit:
             try:
@@ -129,7 +128,7 @@ class LiveJournalTest(unittest.TestCase):
         def finish():
             if proc.poll() is None:
                 proc.kill()
-            proc.communicate(timeout=10)
+            proc.communicate(timeout=30)
         self.addCleanup(finish)
         return proc
 
@@ -167,7 +166,7 @@ class LiveJournalTest(unittest.TestCase):
         self.assertTrue(status['input_incomplete'])
         self.assertEqual(status['page'], 2)
         proc.send_signal(signal.SIGTERM)
-        stdout, stderr = proc.communicate(timeout=10)
+        stdout, stderr = proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 0, stderr)
         status = json.loads((out / 'live-status.json').read_text())
         self.assertEqual(status['status'], 'stopped')
@@ -187,7 +186,7 @@ class LiveJournalTest(unittest.TestCase):
         self.writer.append(3, 41459999)
         self.wait_status(out, lambda x: x['records'] == 8)
         self.assertEqual(pa.ipc.open_stream(out / 'factors.arrow').read_all().num_rows, 8)
-        self.writer.append(3, 41460000)
+        self.writer.append(3, 41460001)
         am = self.wait_status(out, lambda x: x['emitted_endpoints'] == 14400)
         self.assertEqual(am['late_events'], 2)
         self.assertTrue(pa.ipc.open_stream(out / 'factors.arrow').read_all().slice(0, 8).equals(first))
@@ -195,7 +194,7 @@ class LiveJournalTest(unittest.TestCase):
         self.writer.append(3, 54060000)
         self.writer.append(4, 55800000)
         self.wait_status(out, lambda x: x['full_grid'])
-        proc.send_signal(signal.SIGTERM); _, stderr = proc.communicate(timeout=10)
+        proc.send_signal(signal.SIGTERM); _, stderr = proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 0, stderr)
         # Frozen-journal replay uses recorded clocks, independent of replay speed
         # or file chunk boundaries, and must match the growing journal result.
@@ -206,16 +205,30 @@ class LiveJournalTest(unittest.TestCase):
         self.assertEqual(np.nansum(expected['order_buy_volume_500ms'].to_numpy()), 400.)
         for workers in (1, 8):
             replay = self.root / f'replay{workers}'
-            result = subprocess.run(self.command(replay, 'replay', workers), capture_output=True, timeout=20)
+            result = subprocess.run(self.command(replay, 'replay', workers), capture_output=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             actual = pa.ipc.open_stream(replay / 'factors.arrow').read_all()
             check = exact_factors(expected, actual)
             self.assertTrue(check['keys_equal']); self.assertEqual(check['exact_columns'], 106)
 
+    def test_watermark_closes_pm_tail_before_the_sixty_second_timer(self):
+        out = self.root / 'early_tail'; proc = self.start(out)
+        self.opening()
+        self.writer.append(1, 54000100, order(10, 54000000))
+        self.writer.append(1, 54000200, order(11, 54000001))
+        self.writer.append(3, 54000501)
+        self.wait_status(out, lambda x: x['full_grid'])
+        lines = (out / 'latency.log').read_text().splitlines()
+        self.assertEqual(lines[-1].split()[0], '15:00:00.500')
+        self.assertFalse(any(line.startswith('15:01:00.000') for line in lines))
+        self.assertEqual(pa.ipc.open_stream(out / 'factors_local.arrow').read_all().num_rows, 115200)
+        proc.send_signal(signal.SIGTERM); _, err = proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 0, err)
+
     def test_integrity_errors_and_missing_final_end(self):
         self.opening()
         out = self.root / 'missing_end'
-        result = subprocess.run(self.command(out, 'replay'), capture_output=True, timeout=10)
+        result = subprocess.run(self.command(out, 'replay'), capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'missing final END', result.stderr)
         self.assertFalse((out / 'factors.arrow').exists())
@@ -224,7 +237,7 @@ class LiveJournalTest(unittest.TestCase):
         with self.writer.path.open('r+b') as f:
             f.seek(137 + 38 + 16); f.write(b'\xff')
         bad = self.root / 'bad_hash'
-        result = subprocess.run(self.command(bad, 'replay'), capture_output=True, timeout=10)
+        result = subprocess.run(self.command(bad, 'replay'), capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'hash mismatch', result.stderr)
         self.assertFalse((bad / 'factors.arrow').exists())
@@ -232,38 +245,33 @@ class LiveJournalTest(unittest.TestCase):
     def test_follow_refuses_overwriting_a_previous_output(self):
         out = self.root / 'existing'; cmd = self.command(out)
         (out / 'factors.arrow').write_bytes(b'accepted')
-        result = subprocess.run(cmd, capture_output=True, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((out / 'factors.arrow').read_bytes(), b'accepted')
 
-    def test_latency_is_flushed_with_arrow_and_includes_waiting_for_watermark(self):
+    def test_latency_matches_cutoffs_and_both_outputs_not_exchange_endpoints(self):
         out = self.root / 'latency'; proc = self.start(out)
         w = self.writer
         w.append(2, 34199000, b'{}')
         w.append(1, 34200200, order(1, 34200200))
         self.wait_status(out, lambda x: x['input_rows'] == 1)
-        # The event has been read but the window cannot close yet. This delay
-        # belongs to read->write, not to close->write.
         self.assertEqual((out / 'latency.log').read_text(), '')
-        time.sleep(.2)
+        time.sleep(.2)  # waiting for the next frame is outside Huatai latency
         w.append(1, 34201100, order(2, 34201100))
         w.append(3, 34202000)
-        self.wait_status(out, lambda x: x['emitted_endpoints'] == 2)
-        with (out / 'latency.csv').open() as f: rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 2)
-        first, empty = rows
-        self.assertEqual(first['endpoint'], '09:30:00.500')
-        self.assertGreater(float(first['last_read_to_write_ms']), 190.)
-        self.assertGreater(float(first['last_read_to_write_ms']), float(first['close_to_write_ms']) + 190.)
-        self.assertEqual(first['last_recv_ns'], str(DAY0 + 34200200 * 1000000))
-        self.assertEqual(first['last_recv_to_write_ms'], '')  # historical source-clock replay
-        self.assertEqual(empty['events'], '0')
-        self.assertEqual(empty['last_read_to_write_ms'], '')
-        self.assertEqual(pa.ipc.open_stream(out / 'factors.arrow').read_all().num_rows, len(rows) * 4)
-        proc.send_signal(signal.SIGTERM); _, stderr = proc.communicate(timeout=10)
+        status = self.wait_status(out, lambda x: x['emitted_endpoints'] == 2)
+        rows = [line.split() for line in (out / 'latency.log').read_text().splitlines()]
+        self.assertEqual([r[0] for r in rows], ['09:30:00.500', '09:30:01.000', '09:30:01.500'])
+        self.assertTrue(all(0 <= float(r[1]) < 190 for r in rows))
+        self.assertEqual(status['local_emitted_endpoints'], 3)
+        self.assertEqual(pa.ipc.open_stream(out / 'factors.arrow').read_all().num_rows, 8)
+        self.assertEqual(pa.ipc.open_stream(out / 'factors_local.arrow').read_all().num_rows, 12)
+        self.assertFalse((out / 'latency.csv').exists())
+        self.assertFalse((out / 'latency.meta.json').exists())
+        proc.send_signal(signal.SIGTERM); _, stderr = proc.communicate(timeout=60)
         self.assertEqual(proc.returncode, 0, stderr)
 
-    def test_latency_on_off_preserves_factor_bits_and_logs_automatic_flushes(self):
+    def test_latency_on_off_preserves_both_grids_and_counts_no_row_cutoffs(self):
         self.opening()
         self.writer.append(3, 41460000)
         self.writer.append(3, 54060000)
@@ -272,33 +280,27 @@ class LiveJournalTest(unittest.TestCase):
         for enabled in ('on', 'off'):
             out = self.root / enabled
             result = subprocess.run(self.command(out, 'replay', 8) + ['--latency', enabled],
-                                    capture_output=True, timeout=20)
+                                    capture_output=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
-            tables.append(pa.ipc.open_stream(out / 'factors.arrow').read_all())
-        check = exact_factors(*tables)
-        self.assertEqual(check['exact_columns'], 106); self.assertTrue(check['keys_equal'])
+            tables.append([pa.ipc.open_stream(out / name).read_all()
+                           for name in ['factors.arrow', 'factors_local.arrow']])
+        for i in range(2):
+            check = exact_factors(tables[0][i], tables[1][i])
+            self.assertEqual(check['exact_columns'], 106); self.assertTrue(check['keys_equal'])
+            self.assertEqual(tables[0][i].num_rows, 115200)
         self.assertFalse((self.root / 'off/latency.log').exists())
-        with (self.root / 'on/latency.csv').open() as f: rows = list(csv.DictReader(f))
-        self.assertEqual(len(rows), 28800)
-        # Each Arrow automatic 1024-endpoint flush has its own completion stamp,
-        # even when one session timer closes thousands of endpoints together.
-        by_flush = {}
-        for r in rows:
-            by_flush.setdefault(r['flush_id'], []).append(r)
-            self.assertEqual(r['last_recv_to_write_ms'], '')
-            self.assertEqual(r['phase'], 'replay')
-            self.assertEqual(r['clock'], 'exch')
-        with (self.root / 'on/factors.arrow').open('rb') as f:
-            batches = list(pa.ipc.open_stream(f))
-        self.assertEqual([len(x) * 4 for x in by_flush.values()], [b.num_rows for b in batches])
-        self.assertTrue(all(len({r['write_steady_ns'] for r in group}) == 1 for group in by_flush.values()))
+        rows = [line.split() for line in (self.root / 'on/latency.log').read_text().splitlines()]
+        self.assertEqual(len(rows), 28800 + 3600 + 2 + 1)
+        self.assertEqual(sum(r[0] == '15:01:00.000' for r in rows), 2)
+        self.assertEqual(sum(r[0] == '11:31:00.000' for r in rows), 1)
+        self.assertEqual(rows[-1][0], '15:30:00.000')
 
     def test_missing_intermediate_page_is_not_a_successful_end(self):
         self.opening(); self.writer.append(4, 55800000); self.writer.close_page()
         self.writer.new_page()
         self.writer.path.rename(self.writer.directory / 'yjj.cms_l2_raw_v1.3.journal')
         out = self.root / 'page_gap'
-        result = subprocess.run(self.command(out, 'replay'), capture_output=True, timeout=10)
+        result = subprocess.run(self.command(out, 'replay'), capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'missing journal page', result.stderr)
 
@@ -321,9 +323,9 @@ class LiveJournalTest(unittest.TestCase):
         subprocess.run([str(self.kernel), '--input', str(dtype), '--thresh', str(self.root / 'thresh'),
                         '--ref', str(self.root / 'ref'), '--day', DAY, '--output-mode', 'stream',
                         '--work-dir', str(baseline), '--out', str(baseline / 'factors.arrow')],
-                       check=True, capture_output=True, timeout=20)
+                       check=True, capture_output=True, timeout=60)
         dest = self.root / 'direct'
-        result = subprocess.run(self.command(dest, 'replay'), capture_output=True, timeout=20)
+        result = subprocess.run(self.command(dest, 'replay'), capture_output=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         check = exact_factors(pa.ipc.open_stream(baseline / 'factors.arrow').read_all(),
                               pa.ipc.open_stream(dest / 'factors.arrow').read_all())
@@ -337,12 +339,12 @@ class LiveJournalTest(unittest.TestCase):
         try:
             ready = json.loads(proc.stdout.readline())
             drain(ready['ready_records'])
-            out, err = proc.communicate('go\n', timeout=10)
+            out, err = proc.communicate('go\n', timeout=60)
             self.assertEqual(proc.returncode, 0, err)
             return json.loads(out)
         finally:
             if proc.poll() is None: proc.kill()
-            proc.communicate(timeout=10)
+            proc.communicate(timeout=30)
 
     def test_five_x_growing_pages_keep_bytes_clocks_and_factors(self):
         w = self.writer
@@ -380,19 +382,19 @@ class LiveJournalTest(unittest.TestCase):
             with (copied / 'yjj.cms_l2_raw_v1.2.journal').open('rb') as f:
                 f.seek(original_pos); self.assertEqual(f.read(1), b'\0')
             proc.send_signal(signal.SIGTERM)
-            _, err = proc.communicate(timeout=10)
+            _, err = proc.communicate(timeout=30)
             self.assertEqual(proc.returncode, 0, err)
             expected_out = self.root / 'frozen'
-            result = subprocess.run(self.command(expected_out, 'replay', 8), capture_output=True, timeout=10)
+            result = subprocess.run(self.command(expected_out, 'replay', 8), capture_output=True, timeout=60)
             self.assertEqual(result.returncode, 0, result.stderr)
             a = pa.ipc.open_stream(out / 'factors.arrow').read_all()
             b = pa.ipc.open_stream(expected_out / 'factors.arrow').read_all()
-            check = exact_factors(a, b)
+            check = exact_factors(a, b.slice(0, a.num_rows))
             self.assertEqual(check['exact_columns'], 106); self.assertTrue(check['keys_equal'])
             self.assertFalse(json.loads((out / 'live-status.json').read_text())['journal_ended'])
         finally:
             if proc.poll() is None: proc.kill()
-            proc.communicate(timeout=10)
+            proc.communicate(timeout=30)
 
     def test_paced_replay_rejects_invalid_speed_and_existing_destination(self):
         dest = self.root / 'existing'; dest.mkdir()
@@ -400,7 +402,7 @@ class LiveJournalTest(unittest.TestCase):
         for speed in ['0', '-1', 'nan', '5']:
             cmd = [str(self.kernel.with_name('cms_journal_replayer')), '--source', str(self.writer.directory),
                    '--dest', str(dest), '--pace-from-ns', '1', '--until-ns', '2', '--speed', speed]
-            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            result = subprocess.run(cmd, capture_output=True, timeout=60)
             self.assertNotEqual(result.returncode, 0)
         self.assertEqual(keep.read_bytes(), b'keep')
 

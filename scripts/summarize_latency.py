@@ -29,7 +29,7 @@ def stats(values, threshold):
 
 def summarize(path, phase=None, reason=None, session='trading', include_empty=False, threshold=10.):
     path = Path(path)
-    if path.is_dir(): path = path / 'latency.csv'
+    if path.is_dir(): path = path / 'latency.log'
     with path.open() as f:
         lines = [line for line in f if line.endswith('\n')]
     detailed = path.suffix == '.csv'

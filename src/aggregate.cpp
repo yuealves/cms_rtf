@@ -120,13 +120,15 @@ int64_t DayStart(const std::string& day) {
 }
 
 void AddBookValue(const BookRec* r, double ret, int32_t ep, double w, Endpoint& a) {
+  AddBookValueAtAge(r, ret, r ? (static_cast<int64_t>(ep) - r->act_ms) / 1000.0 : 0, w, a);
+}
+void AddBookValueAtAge(const BookRec* r, double ret, double age, double w, Endpoint& a) {
   if (!r || !std::isfinite(r->mid) || r->act_ms < 0) return;
   for (int c = 0; c < 31; ++c) if (std::isfinite(r->feat[c])) {
     a.num[c] += w * r->feat[c]; a.den[c] += w;
   }
   if (std::isfinite(ret)) { a.num[31] += w * ret; a.den[31] += w; }
   a.valid_weight += w;
-  const double age = (static_cast<int64_t>(ep) - r->act_ms) / 1000.0;
   a.age += w * age;
   if (age < 0.5) a.fresh += w;
 }
@@ -178,10 +180,9 @@ struct ArrowOutput::Impl {
   std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
   std::vector<int32_t> endpoints;
   std::vector<WindowRows> rows;
-  bool live;
-  std::function<void(const std::vector<int32_t>&)> flush_observer;
-  Impl(const std::string& path, int64_t day, bool publish_live) : destination(path),
-      temporary(publish_live ? path : path + ".tmp." + std::to_string(getpid())), day0(day), live(publish_live) {
+  bool live, huatai_cutoffs;
+  Impl(const std::string& path, int64_t day, bool publish_live, bool flush_on_cutoff) : destination(path),
+      temporary(publish_live ? path : path + ".tmp." + std::to_string(getpid())), day0(day), live(publish_live), huatai_cutoffs(flush_on_cutoff) {
     std::vector<std::shared_ptr<arrow::Field>> fields = {
       arrow::field("datetime", arrow::timestamp(arrow::TimeUnit::MICRO)), arrow::field("code", arrow::utf8())};
     for (const char* name : kColumnNames) fields.push_back(arrow::field(name, arrow::float32()));
@@ -205,16 +206,13 @@ struct ArrowOutput::Impl {
     }
   }
 };
-ArrowOutput::ArrowOutput(const std::string& path, int64_t day0, bool live)
-    : impl_(std::make_unique<Impl>(path, day0, live)) {}
+ArrowOutput::ArrowOutput(const std::string& path, int64_t day0, bool live, bool huatai_cutoffs)
+    : impl_(std::make_unique<Impl>(path, day0, live, huatai_cutoffs)) {}
 ArrowOutput::~ArrowOutput() = default;
-void ArrowOutput::SetFlushObserver(std::function<void(const std::vector<int32_t>&)> observer) {
-  impl_->flush_observer = std::move(observer);
-}
 uint64_t ArrowOutput::rows() const { return impl_->count; }
 void ArrowOutput::Append(int32_t ep, const WindowRows& rows) {
   impl_->endpoints.push_back(ep); impl_->rows.push_back(rows); impl_->count += kNumIndices;
-  if (impl_->rows.size() == 1024) Flush();
+  if (!impl_->huatai_cutoffs && impl_->rows.size() == 1024) Flush();
 }
 void ArrowOutput::Flush() {
   auto& p = *impl_;
@@ -233,13 +231,12 @@ void ArrowOutput::Flush() {
     Check(values.Reserve(n));
     for (const auto& window : p.rows) for (const auto& row : window) {
       const float v = row[c];
-      if (std::isnan(v)) Check(values.AppendNull()); else Check(values.Append(v));
+      if (p.huatai_cutoffs ? !std::isfinite(v) : std::isnan(v)) Check(values.AppendNull()); else Check(values.Append(v));
     }
     arrays.push_back(Value(values.Finish()));
   }
   Check(p.writer->WriteRecordBatch(*arrow::RecordBatch::Make(p.schema, n, arrays)));
   Check(p.file->Flush());
-  if (p.flush_observer) p.flush_observer(p.endpoints);
   p.endpoints.clear(); p.rows.clear();
 }
 void ArrowOutput::Commit() {

@@ -7,7 +7,7 @@
 // 聚合在 C++ 侧按 symbol 升序汇总 ⇒ 输出与 worker 数无关（位级一致）。
 //
 // 输入：cms_journal_export 的 128B DTYPE 行流（文件；头部 CMSPQ01\0 自动跳过）。
-// stream 输出：单个最终 Arrow；blocks/legacy 显式保留离线记录文件作对照。
+// journal 输出 local/exch 两路最终 Arrow；DTYPE/blocks/legacy 保留离线对照。
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -43,6 +43,7 @@
 #include "cms_rtf/dtype_row.h"
 #include "cms_rtf/journal_input.h"
 #include "cms_rtf/latency.h"
+#include "cms_rtf/close_schedule.h"
 
 namespace {
 
@@ -148,8 +149,11 @@ struct SymbolBuffers : RecordSink {
   }
 };
 
+// Internal transport only: EventRec's on-disk 56-byte ABI stays unchanged.
+struct WorkerMessage { EventRec event{}; int64_t local_ns = -1; };
+static_assert(sizeof(WorkerMessage) == 64);
 struct WorkerCtx {
-  SpscRing<EventRec, 1 << 16> ring;
+  SpscRing<WorkerMessage, 1 << 16> ring;
   std::thread thread;
   std::unordered_map<int32_t, SymbolRunner*> states;
   std::unordered_map<int32_t, SymbolBuffers> bufs;
@@ -170,7 +174,7 @@ int Run(int argc, char** argv) {
   std::string input_path, thresh_path, work_dir;
   std::string output_mode = "blocks";
   int workers = 8, window_batch = 64, pending_mib = 256;
-  std::string reference_path, day, output;
+  std::string reference_path, day, output, local_output;
   std::string journal_path, journal_mode = "follow", journal_clock = "wall";
   std::string latency_mode = "auto";
   bool batch_specified = false;
@@ -185,6 +189,7 @@ int Run(int argc, char** argv) {
     else if (k == "--ref") reference_path = v;
     else if (k == "--day") day = v;
     else if (k == "--out") output = v;
+    else if (k == "--local-out") local_output = v;
     else if (k == "--window-batch") { window_batch = std::stoi(v); batch_specified = true; }
     else if (k == "--pending-mib") pending_mib = std::stoi(v);
     else if (k == "--journal") journal_path = v;
@@ -195,6 +200,7 @@ int Run(int argc, char** argv) {
   }
   const bool journal_input = !journal_path.empty();
   const bool follow = journal_input && journal_mode == "follow";
+  if (!journal_input && !local_output.empty()) throw std::runtime_error("--local-out requires --journal");
   if (journal_input && !batch_specified) window_batch = 1;
   if (journal_mode != "follow" && journal_mode != "replay") throw std::runtime_error("invalid journal-mode");
   if (journal_clock != "source" && journal_clock != "wall") throw std::runtime_error("invalid journal-clock");
@@ -215,23 +221,26 @@ int Run(int argc, char** argv) {
   std::unique_ptr<LatencyLog> latency;
 #ifdef CMS_RTF_HAS_ARROW
   std::unique_ptr<aggregation::Reference> reference;
-  std::unique_ptr<aggregation::ArrowOutput> arrow;
-  aggregation::RollingFinalizer finalizer;
+  std::unique_ptr<aggregation::ArrowOutput> arrow, local_arrow;
+  aggregation::RollingFinalizer finalizer, local_finalizer;
   if (streaming) {
     if (reference_path.empty() || day.empty() || output.empty())
       throw std::runtime_error("stream output requires --ref, --day and --out");
     reference = std::make_unique<aggregation::Reference>(aggregation::ReadReference(reference_path));
-    arrow = std::make_unique<aggregation::ArrowOutput>(output, aggregation::DayStart(day), follow);
+    arrow = std::make_unique<aggregation::ArrowOutput>(output, aggregation::DayStart(day), follow, journal_input);
+    if (journal_input) {
+      if (local_output.empty()) {
+        const auto path = std::filesystem::path(output);
+        local_output = (path.parent_path() / (path.filename() == "index_500ms_exch.arrow"
+            ? "index_500ms_local.arrow" : path.stem().string() + "_local.arrow")).string();
+      }
+      if (std::filesystem::absolute(local_output).lexically_normal() == std::filesystem::absolute(output).lexically_normal())
+        throw std::runtime_error("local and exchange outputs require distinct paths");
+      local_arrow = std::make_unique<aggregation::ArrowOutput>(local_output, aggregation::DayStart(day), follow, true);
+    }
     if (track_latency) {
-      const std::string mode = follow ? "journal_follow_" + journal_clock :
-                              (journal_input ? "journal_replay" : "dtype_replay");
       auto directory = std::filesystem::path(output).parent_path();
-      latency = std::make_unique<LatencyLog>(directory.empty() ? "." : directory.string(), mode);
-      arrow->SetFlushObserver([&](const std::vector<int32_t>& endpoints) {
-        const auto done_ns = SteadyNs();
-        const auto wall_ns = WallNs();
-        latency->Written(endpoints, done_ns, wall_ns);
-      });
+      latency = std::make_unique<LatencyLog>(directory.empty() ? "." : directory.string());
     }
   }
 #else
@@ -281,7 +290,7 @@ int Run(int argc, char** argv) {
     // Arrow stores Beijing wall time without a timezone; journal clocks are UTC.
     journal_day0_ns = (aggregation::DayStart(day) - 8LL * 3600 * 1000000) * 1000;
 #endif
-    journal = std::make_unique<JournalInput>(journal_path, std::stoul(day), follow, track_latency);
+    journal = std::make_unique<JournalInput>(journal_path, std::stoul(day), follow);
     std::signal(SIGINT, Stop); std::signal(SIGTERM, Stop);
   }
   std::vector<int8_t> dispatch(1000000, -1);
@@ -315,7 +324,8 @@ int Run(int argc, char** argv) {
     ctx->pending_budget = std::make_unique<PendingBudget>(&pending_pool);
     ctx->thread = std::thread([&, i, ctx = ctx.get()]() {
       try {
-      std::array<EventRec, kBatchSize> batch;
+      std::array<WorkerMessage, kBatchSize> batch;
+      int exch_closed = 0, local_closed = -1;
       unsigned idle_polls = 0;
       const std::string prefix = work_dir + "/w" + std::to_string(i);
       std::unique_ptr<BlockWriter<BookRec>> books;
@@ -412,18 +422,22 @@ int Run(int argc, char** argv) {
         const auto batch_started = std::chrono::steady_clock::now();
         double marker_seconds = 0;
         for (size_t k = 0; k < count; ++k) {
-          const EventRec& ev = batch[k];
+          const EventRec& ev = batch[k].event;
           if (ev.symbol < 0) {
             const auto marker_started = std::chrono::steady_clock::now();
             for (auto& [symbol, runner] : ctx->states) {
-              if (ev.symbol == -2) runner->Finish(); else runner->CloseThrough(ev.time_ms);
+              if (journal_input && ev.ref2 >= 0) runner->CloseLocal(static_cast<int32_t>(ev.ref2));
+              if (ev.symbol == -2) runner->Finish();
+              else if (ev.time_ms > exch_closed) runner->CloseThrough(ev.time_ms);
               ctx->windows.at(symbol)->seed_mid = runner->seed_mid();
             }
+            exch_closed = ev.time_ms;
+            if (ev.ref2 >= 0) local_closed = static_cast<int32_t>(ev.ref2);
             ctx->close_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - marker_started).count();
             std::unique_lock<std::mutex> lock(barrier_mu);
-            ctx->closed_target.store(ev.time_ms, std::memory_order_release);
+            ctx->closed_target.store(ev.biz_index, std::memory_order_release);
             closed_cv.notify_one();
-            resumed_cv.wait(lock, [&] { return resumed_target.load() >= ev.time_ms || worker_failed.load(); });
+            resumed_cv.wait(lock, [&] { return resumed_target.load() >= ev.biz_index || worker_failed.load(); });
             marker_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - marker_started).count();
             continue;
           }
@@ -447,9 +461,12 @@ int Run(int argc, char** argv) {
                                                th != thresh.end() ? th->second.m : 0.0,
                                                grid, sink))
                      .first;
-            if (journal_input) it->second->EnableLive(ctx->closed_target.load(std::memory_order_relaxed));
+            if (journal_input) {
+              it->second->EnableLive(exch_closed);
+              it->second->EnableLocal(th->second.xl, th->second.m, local_closed);
+            }
           }
-          it->second->OnEvent(ev);
+          it->second->OnEvent(ev, batch[k].local_ns);
           ++ctx->events;
         }
         ctx->event_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - batch_started).count() - marker_seconds;
@@ -464,7 +481,7 @@ int Run(int argc, char** argv) {
   }
 
   // Filter before mapping; publish bounded batches to amortize cache-line traffic.
-  std::vector<std::array<EventRec, kBatchSize>> pending(workers);
+  std::vector<std::array<WorkerMessage, kBatchSize>> pending(workers);
   std::vector<size_t> pending_size(workers, 0);
   auto flush = [&](int i) {
     size_t sent = 0;
@@ -476,27 +493,28 @@ int Run(int argc, char** argv) {
     }
     pending_size[i] = 0;
   };
-  int emitted = 0;
-  bool tail_phase = false;
+  int emitted = 0, local_emitted = 0, close_round = 0;
   double merge_seconds = 0, barrier_seconds = 0, read_seconds = 0, map_seconds = 0;
-  auto close_windows = [&](int end, bool eof, const char* reason) {
-    if (end <= emitted || worker_failed.load()) return;
+  auto close_windows = [&](int end, bool eof, int64_t cutoff_ns, int local_pos = -1) {
+    if ((!journal_input && end <= emitted) || worker_failed.load()) return;
+    const int round = ++close_round;
     const auto barrier_started = std::chrono::steady_clock::now();
-    if (latency) latency->BeginClose(reason,
-        follow && journal_clock == "wall" ? (tail_phase ? "tail" : "catchup") : "replay",
+    if (latency) latency->BeginClose(cutoff_ns,
         std::chrono::duration_cast<std::chrono::nanoseconds>(barrier_started.time_since_epoch()).count());
     for (int i = 0; i < workers; ++i) {
       flush(i);
-      EventRec marker{};
-      marker.symbol = eof ? -2 : -1;
-      marker.time_ms = end;
+      WorkerMessage marker{};
+      marker.event.symbol = eof ? -2 : -1;
+      marker.event.time_ms = end;
+      marker.event.biz_index = round;
+      marker.event.ref2 = local_pos >= 0 ? grid[local_pos] : -1;
       while (!ctxs[i]->ring.push_batch(&marker, 1) && !worker_failed.load()) std::this_thread::yield();
     }
     {
       std::unique_lock<std::mutex> lock(barrier_mu);
       closed_cv.wait(lock, [&] {
         if (worker_failed.load()) return true;
-        for (auto& ctx : ctxs) if (ctx->closed_target.load() < end) return false;
+        for (auto& ctx : ctxs) if (ctx->closed_target.load() < round) return false;
         return true;
       });
     }
@@ -504,6 +522,21 @@ int Run(int argc, char** argv) {
     barrier_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - barrier_started).count();
 #ifdef CMS_RTF_HAS_ARROW
     const auto merge_started = std::chrono::steady_clock::now();
+    if (local_pos >= 0) {
+      std::array<aggregation::Endpoint, 4> acc{};
+      for (const auto& [symbol, weights] : reference->weights) {
+        const auto& states = ctxs[dispatch[symbol]]->states;
+        const auto found = states.find(symbol);
+        if (found == states.end()) continue;
+        const auto& local = *found->second->local();
+        for (int idx = 0; idx < 4; ++idx) if (weights[idx] > 0) {
+          aggregation::AddBookValueAtAge(&local.book, local.ret, local.age, weights[idx], acc[idx]);
+          aggregation::AddFlowValue(local.output, weights[idx], acc[idx]);
+        }
+      }
+      local_arrow->Append(grid[local_pos], local_finalizer.Publish(local_pos, acc, *reference));
+      local_emitted = local_pos + 1;
+    }
     struct Member { const std::array<double, 4>* weights; WindowRecords* records; };
     std::vector<Member> members;
     for (const auto& [symbol, weights] : reference->weights) {
@@ -540,29 +573,32 @@ int Run(int argc, char** argv) {
       }
       arrow->Append(grid[e], finalizer.Publish(e, acc, *reference));
     }
-    // Flush to the single final-format Arrow stream even while stdin stays open.
-    arrow->Flush();
     for (auto& ctx : ctxs) {
       for (auto& [symbol, window] : ctx->windows) { (void)symbol; window->Consumed(); }
       ctx->pending_budget->Reclaim();
     }
+    // Huatai MarkCutoffComplete: LOCAL then EXCH; end the probe immediately
+    // after the second Flush, before writing the latency log itself.
+    if (local_arrow) local_arrow->Flush();
+    arrow->Flush();
+    if (latency) latency->Written(SteadyNs());
     merge_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - merge_started).count();
 #endif
     emitted = end;
-    { std::lock_guard<std::mutex> lock(barrier_mu); resumed_target.store(end, std::memory_order_release); }
+    { std::lock_guard<std::mutex> lock(barrier_mu); resumed_target.store(round, std::memory_order_release); }
     resumed_cv.notify_all();
   };
   std::vector<int32_t> channel_time(2 * 65536, -1);
   std::vector<int> channels;
   std::string input_failure;
   std::vector<DtypeRow> rows(journal_input ? 4096 : (1 << 16));
-  std::vector<int64_t> read_stamps(track_latency ? rows.size() : 0);
   int64_t n_events = 0, input_rows = 0, late_events = 0;
   size_t carry = has_magic ? 0 : prefix_size;
   if (carry) std::memcpy(rows.data(), prefix.data(), carry);
   bool input_error = false;
   bool reader_caught_up = false;
-  int64_t source_clock_ns = 0, next_clock_poll_ns = 0;
+  int64_t source_clock_ns = 0;
+  CloseSchedule schedule(grid);
   int32_t clock_ms = -1;
   auto last_status = std::chrono::steady_clock::time_point{};
   auto write_status = [&](const char* state, bool force = false) {
@@ -580,6 +616,7 @@ int Run(int argc, char** argv) {
     const auto bytes = std::filesystem::file_size(output, ignored);
     out << "{\"status\":\"" << state << "\",\"day\":\"" << day
         << "\",\"pid\":" << getpid() << ",\"emitted_endpoints\":" << emitted
+        << ",\"local_emitted_endpoints\":" << local_emitted
         << ",\"last_endpoint_ms\":" << (emitted ? grid[emitted - 1] : -1)
         << ",\"clock_ms\":" << clock_ms << ",\"source_clock_ns\":" << source_clock_ns
         << ",\"records\":" << js.records << ",\"input_rows\":" << input_rows
@@ -592,35 +629,34 @@ int Run(int argc, char** argv) {
         << ",\"peak_rss_kib\":" << usage.ru_maxrss
         << ",\"arrow_bytes\":" << (ignored ? 0 : bytes)
         << ",\"latency_enabled\":" << (latency ? "true" : "false")
-        << ",\"full_grid\":" << (emitted == kNumEndpoints ? "true" : "false") << "}\n";
+        << ",\"full_grid\":" << (emitted == kNumEndpoints && local_emitted == kNumEndpoints ? "true" : "false") << "}\n";
     out.close(); std::filesystem::rename(tmp, path);
   };
-  auto advance_clock = [&](int64_t ns, bool force = false) {
-    if (ns < journal_day0_ns || ns >= journal_day0_ns + 86400000000000LL)
-      throw std::runtime_error("journal source clock is outside its trading day");
-    source_clock_ns = std::max(source_clock_ns, ns);
-    if (!force && source_clock_ns < next_clock_poll_ns) return;
-    next_clock_poll_ns = (source_clock_ns / 500000000 + 1) * 500000000;
-    clock_ms = static_cast<int32_t>((source_clock_ns - journal_day0_ns) / 1000000);
+  auto cutoff = [&](int64_t ns_of_day, bool timed) {
     int32_t watermark = -1;
     if (!channels.empty()) {
       watermark = kPmCloseMs + 1;
       for (const int c : channels) watermark = std::min(watermark, channel_time[c]);
     }
     int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
-    // Retain CMS closing batches until the explicit Huatai +60s session timer.
-    // Source time drives replay; idle wall time is permitted only after the
-    // reader has drained all currently committed frames in follow mode.
-    if ((watermark >= kAmCloseMs && watermark <= kPmOpenMs) || watermark >= kPmCloseMs)
-      end = emitted;
-    const char* reason = "watermark";
-    if (clock_ms >= kAmCloseMs + 60000 && end < kNumEndpoints / 2 && emitted < kNumEndpoints / 2) {
-      end = kNumEndpoints / 2; reason = "am_timer";
+    if (timed) {
+      if (ns_of_day >= (int64_t(kPmCloseMs) + 60000) * 1000000) end = kNumEndpoints;
+      else if (ns_of_day >= (int64_t(kAmCloseMs) + 60000) * 1000000) end = std::max(end, kNumEndpoints / 2);
     }
-    if (clock_ms >= kPmCloseMs + 60000 && emitted < kNumEndpoints) {
-      end = kNumEndpoints; reason = "pm_timer";
+    int local_pos = -1;
+    if (!timed) {
+      const auto it = std::lower_bound(grid.begin(), grid.end(), ns_of_day / 1000000);
+      if (it != grid.end() && int64_t(*it) * 1000000 == ns_of_day && it - grid.begin() >= local_emitted)
+        local_pos = it - grid.begin();
     }
-    if (end > emitted) close_windows(end, false, reason);
+    close_windows(std::max(emitted, end), false, ns_of_day, local_pos);
+  };
+  auto advance_clock = [&](int64_t ns) {
+    if (ns < journal_day0_ns || ns >= journal_day0_ns + 86400000000000LL)
+      throw std::runtime_error("journal source clock is outside its trading day");
+    source_clock_ns = std::max(source_clock_ns, ns);
+    clock_ms = static_cast<int32_t>((source_clock_ns - journal_day0_ns) / 1000000);
+    schedule.Frame(ns - journal_day0_ns, cutoff);
   };
   try {
   write_status("running", true);
@@ -642,7 +678,6 @@ int Run(int argc, char** argv) {
         const auto result = journal->Next(rows[got]);
         if (result == JournalInput::Result::Idle) { idle = true; break; }
         if (result == JournalInput::Result::Eof) { eof = true; break; }
-        if (latency) read_stamps[got] = journal->read_steady_ns();
         ++got;
       }
       reader_caught_up = idle || eof;
@@ -655,7 +690,6 @@ int Run(int argc, char** argv) {
       if (received < 0) { input_error = true; break; }
       bytes = static_cast<size_t>(received); total = bytes + carry;
       got = total / sizeof(DtypeRow); input_rows += got;
-      if (latency) std::fill_n(read_stamps.begin(), got, SteadyNs());
     }
     read_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - read_started).count();
     const auto map_started = std::chrono::steady_clock::now();
@@ -670,7 +704,6 @@ int Run(int argc, char** argv) {
       const int worker = dispatch[sym];
       if (worker < 0) continue;
       const EventRec ev = map_row(rows[j], sym);
-      if (latency) latency->Observe(ev.time_ms, emitted, rows[j].recv_ns, read_stamps[j]);
       if (streaming) {
         if (emitted && ev.time_ms <= grid[emitted - 1]) {
           if (journal) ++late_events;
@@ -681,7 +714,7 @@ int Run(int argc, char** argv) {
         if (channel_time[channel] < 0) channels.push_back(channel);
         channel_time[channel] = std::max(channel_time[channel], ev.time_ms);
       }
-      pending[worker][pending_size[worker]++] = ev;
+      pending[worker][pending_size[worker]++] = WorkerMessage{ev, journal_input ? rows[j].nano_timestamp - journal_day0_ns : -1};
       if (pending_size[worker] == kBatchSize) flush(worker);
       ++n_events;
     }
@@ -691,7 +724,7 @@ int Run(int argc, char** argv) {
       if (idle && follow && journal_clock == "wall") {
         const int64_t wall_day = (idle_sample_ns - journal_day0_ns) / 1000000;
         if (wall_day >= 0 && wall_day < 86400000) {
-          if (journal->stats().records) advance_clock(idle_sample_ns);
+          if (journal->stats().records) schedule.Idle(idle_sample_ns - journal_day0_ns, cutoff);
         }
         else throw std::runtime_error("follow wall clock must match --day; use journal-mode replay for history");
         // Gateway normally emits END at 15:30. Do not treat a midday END or an
@@ -703,8 +736,7 @@ int Run(int argc, char** argv) {
         }
       }
       write_status("running");
-      if (idle) tail_phase = true;
-      if (eof) { if (source_clock_ns) advance_clock(source_clock_ns, true); break; }
+      if (eof) break;
       if (idle) std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
@@ -716,11 +748,12 @@ int Run(int argc, char** argv) {
       for (const auto channel : channels) watermark = std::min(watermark, channel_time[channel]);
       const int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
       const bool closing_batch = (watermark >= kAmCloseMs && watermark <= kPmOpenMs) || watermark >= kPmCloseMs;
-      if (!closing_batch && end - emitted >= window_batch) close_windows(end, false, "watermark");
+      if (!closing_batch && end - emitted >= window_batch) close_windows(end, false, int64_t(grid[end - 1]) * 1000000);
     }
   }
   if (input_error) fail_workers();
-  if (streaming && !input_error && !journal_input) close_windows(kNumEndpoints, true, "eof");
+  if (streaming && !input_error && !journal_input) close_windows(kNumEndpoints, true, int64_t(kPmCloseMs) * 1000000);
+  if (journal_input && !input_error && !worker_failed.load()) schedule.Finish(cutoff);
   } catch (const std::exception& e) {
     input_failure = e.what();
     fail_workers();
@@ -766,7 +799,7 @@ int Run(int argc, char** argv) {
   }
   if (input_error) { std::cerr << "truncated or unreadable DTYPE stream\n"; return 1; }
 #ifdef CMS_RTF_HAS_ARROW
-  if (streaming) arrow->Commit();
+  if (streaming) { if (local_arrow) local_arrow->Commit(); arrow->Commit(); }
   write_status(stopping ? "stopped" : "completed", true);
 #endif
   size_t pending_peak = 0;
@@ -783,7 +816,7 @@ int Run(int argc, char** argv) {
   getrusage(RUSAGE_SELF, &usage);
   std::printf("{\"read_seconds\": %.6f, \"map_seconds\": %.6f, \"barrier_seconds\": %.6f, "
               "\"max_worker_event_seconds\": %.6f, \"max_worker_close_seconds\": %.6f, "
-              "\"emitted_endpoints\": %d, \"merge_seconds\": %.6f, \"sum_worker_peak_pending_payload_bytes\": %zu, \"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
+              "\"emitted_endpoints\": %d, \"local_emitted_endpoints\": %d, \"merge_seconds\": %.6f, \"sum_worker_peak_pending_payload_bytes\": %zu, \"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
               "\"output_capacity_at_eof_bytes\": %" PRIu64 ", \"sh_identities_at_eof\": %" PRIu64 ", "
               "\"sh_identity_capacity_at_eof_bytes\": %" PRIu64 ", \"live_orders_at_eof\": %" PRIu64 ", "
               "\"input_rows\": %" PRId64 ", \"dispatch_seconds\": %.6f, "
@@ -793,7 +826,7 @@ int Run(int argc, char** argv) {
               ", \"agg_skip\": %" PRId64 ", \"crossed_book\": %" PRId64
               ", \"immediate_fill\": %" PRId64 ", \"sz_non_monotonic\": %" PRId64 "}\n",
               read_seconds, map_seconds, barrier_seconds, max_worker_event_seconds, max_worker_close_seconds,
-              emitted, merge_seconds, pending_peak, output_mode.c_str(), usage.ru_maxrss, output_capacity, sh_identities, identity_capacity, live_orders,
+              emitted, local_emitted, merge_seconds, pending_peak, output_mode.c_str(), usage.ru_maxrss, output_capacity, sh_identities, identity_capacity, live_orders,
               input_rows, dispatch_s, total_s, n_events, workers, spin_waits, total.over_deduct, total.d_unknown,
               total.unknown_trade_ref, total.late_passive_ref, total.agg_skip,
               total.crossed_book, total.immediate_fill, nonmono);

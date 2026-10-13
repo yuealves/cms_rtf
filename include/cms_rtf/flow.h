@@ -1,7 +1,7 @@
 #pragma once
 
-// cms_rtf 每股交易所网格流量状态机：移植 light_rtf v2 index_500ms/state.cpp
-// 的交易所网格半边（batch 不需要 local 网格/水位/双网格隔离）。
+// 每股单时钟流量状态机，移植 light_rtf v2 index_500ms/state.cpp。
+// journal 的 local/exch 各持一份；盘口共享，流量和 SH 身份独立。
 //
 // 口径要点（与 online_simu 实时版逐字一致，见 light_rtf 语义映射文档）：
 //   - SH 委托增量：orderid 全天身份跟踪（已观察累计量、已知价买 max/卖 min、
@@ -12,6 +12,7 @@
 //   - SH 成交：side∈{B,S} 且双引用非零进 trade 族 + 主动腿 ShNote；N 排除。
 //   - SZ 撤单（trade_type='4'）进 cancel 族；撤单无金额。
 
+#include <algorithm>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -62,6 +63,7 @@ struct SzPriceBook {
   struct Mark {
     int64_t biz = 0;
     int32_t time_ms = 0;
+    int64_t arrival_ns = -1;
     double px = 0.0;
     bool has = false;
   } last[2];  // [0]=买主动(B) [1]=卖主动(S)
@@ -76,21 +78,42 @@ class SymbolFlow {
   // 处理一个事件；session 边界封口、桶推进与发布（经 Emit 回调）都在内部完成。
   // 输出：非空桶 → Emit(ep_ms, bases21)。
   template <typename Emit>
-  void OnEvent(const EventRec& ev, Emit&& emit, bool allow_flow = true) {
+  void OnEvent(const EventRec& ev, Emit&& emit, bool allow_flow = true, int64_t arrival_ns = -1) {
     // 时段跨越先封口（light_rtf worker.cpp OnEvent 的 session-boundary seal）
     if (ev.time_ms > kPmCloseMs) {
       AdvanceTo(kPmCloseMs + kGridMs, emit);
     } else if (ev.time_ms > kAmCloseMs && ev.time_ms <= kPmOpenMs) {
       AdvanceTo(kAmCloseMs + kGridMs, emit);
     }
-    const bool in_session = InSessionExchMs(ev.time_ms) && allow_flow;
+    Process(ev, emit, InSessionExchMs(ev.time_ms) && allow_flow,
+            EndpointMs(ev.time_ms), arrival_ns);
+  }
+
+  // Huatai state.cpp: independent receive-clock bucket and SH identities. Keep
+  // the original exchange time for SZ preceding-price checks. Ceil nanoseconds,
+  // not milliseconds: an event 1ns after a cutoff belongs to the next bucket.
+  template <typename Emit>
+  void OnLocalEvent(const EventRec& ev, int64_t ns_of_day, Emit&& emit) {
+    const bool active = (ns_of_day > int64_t(kMarketOpenMs) * 1000000 &&
+                         ns_of_day <= int64_t(kAmCloseMs) * 1000000) ||
+                        (ns_of_day > int64_t(kPmOpenMs) * 1000000 &&
+                         ns_of_day <= int64_t(kPmCloseMs) * 1000000);
+    Process(ev, emit, active, int32_t((ns_of_day + 499999999) / 500000000 * kGridMs), ns_of_day);
+  }
+
+ private:
+  template <typename Emit>
+  void Process(const EventRec& ev, Emit& emit, bool in_session, int32_t endpoint, int64_t arrival_ns) {
+    arrival_ns_ = arrival_ns;
+    if (in_session) AdvanceTo(endpoint, emit);
     if (ev.kind == 0) {
-      OnOrder(ev, in_session, emit);
+      OnOrder(ev, in_session);
     } else {
-      OnTrade(ev, in_session, emit);
+      OnTrade(ev, in_session);
     }
   }
 
+ public:
   // 股流结束：封口当前未发布桶（若有）
   template <typename Emit>
   void Finish(Emit&& emit) {
@@ -112,6 +135,7 @@ class SymbolFlow {
   double thresh_xl_, thresh_m_;
   FlowBases cur_{};
   int32_t cur_ep_ = -1;
+  int64_t arrival_ns_ = -1;
   IdentityTable<ShOrderTrack> sh_orders_;
   std::unordered_map<int64_t, ShFrag> sh_bucket_;
   std::unordered_map<int32_t, SzPriceBook> sz_prices_;
@@ -203,12 +227,10 @@ class SymbolFlow {
     }
   }
 
-  template <typename Emit>
-  void OnOrder(const EventRec& ev, bool in_session, Emit& emit) {
+  void OnOrder(const EventRec& ev, bool in_session) {
     const bool is_sh = IsSh(ev.symbol);
     if (is_sh && ev.order_type == kShOrderAdd) {
       if (in_session) {
-        AdvanceTo(EndpointMs(ev.time_ms), emit);
         ShNote(ev.ref1, ev.side, ev.volume, ev.px_tick / 10000.0);
       } else {
         // 非会话时段 SH A：只播种身份，不进流量
@@ -220,7 +242,6 @@ class SymbolFlow {
       if (!in_session) {
         return;
       }
-      AdvanceTo(EndpointMs(ev.time_ms), emit);
       if (ev.side == kSideBuy) {
         cur_.v[9] += 1;
         cur_.v[11] += ev.volume;
@@ -237,7 +258,6 @@ class SymbolFlow {
       if (!in_session) {
         return;
       }
-      AdvanceTo(EndpointMs(ev.time_ms), emit);
       double px = 0.0;
       if (ev.order_type == kSzOrderLimit) {
         px = ev.px_tick / 10000.0;
@@ -247,7 +267,7 @@ class SymbolFlow {
         const int i = (ev.side == kSideBuy) ? 1 : 0;  // 对手方向
         double ref = 0.0;
         if (pb.last[i].has && pb.last[i].biz < ev.biz_index &&
-            pb.last[i].time_ms <= ev.time_ms) {
+            pb.last[i].time_ms <= ev.time_ms && pb.last[i].arrival_ns <= arrival_ns_) {
           ref = pb.last[i].px;
         }
         if (ref > 0) {
@@ -283,14 +303,12 @@ class SymbolFlow {
     // 其他类型不进桶
   }
 
-  template <typename Emit>
-  void OnTrade(const EventRec& ev, bool in_session, Emit& emit) {
+  void OnTrade(const EventRec& ev, bool in_session) {
     const bool is_sh = IsSh(ev.symbol);
     if (is_sh) {
       if (!in_session) {
         return;
       }
-      AdvanceTo(EndpointMs(ev.time_ms), emit);
       if ((ev.side == kSideBuy || ev.side == kSideSell) && ev.ref1 != 0 && ev.ref2 != 0) {
         const double px = ev.px_tick / 10000.0;
         const double money = ev.volume * px;
@@ -327,12 +345,12 @@ class SymbolFlow {
         }
         mark.biz = ev.biz_index;
         mark.time_ms = ev.time_ms;
+        mark.arrival_ns = arrival_ns_;
         mark.px = ev.px_tick / 10000.0;
         mark.has = true;
         if (!in_session) {
           return;
         }
-        AdvanceTo(EndpointMs(ev.time_ms), emit);
         const double px = ev.px_tick / 10000.0;
         const double money = ev.volume * px;
         if (side == kSideBuy) {
@@ -358,7 +376,6 @@ class SymbolFlow {
       if (!in_session) {
         return;
       }
-      AdvanceTo(EndpointMs(ev.time_ms), emit);
       if (ev.side == kSideBuy) {
         cur_.v[9] += 1;
         cur_.v[11] += ev.volume;

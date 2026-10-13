@@ -18,11 +18,10 @@ struct JournalStats {
 class JournalInput {
  public:
   enum class Result { Row, Idle, Eof };
-  JournalInput(std::string directory, uint32_t day, bool follow, bool track_read_time = false);
+  JournalInput(std::string directory, uint32_t day, bool follow);
   ~JournalInput();
   Result Next(DtypeRow& row);
   const JournalStats& stats() const;
-  int64_t read_steady_ns() const;
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

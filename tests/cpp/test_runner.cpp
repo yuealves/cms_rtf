@@ -36,7 +36,44 @@ static void compare(int32_t symbol, const std::vector<EventRec>& events) {
   check(lazy.non_monotonic() == eager.non_monotonic());
 }
 
+static void local_clock_boundaries() {
+  const auto grid = BuildGrid();
+  std::vector<BookRec> books;
+  std::vector<FlowRec> flows;
+  SymbolRunner runner(1, 100000, 20000, grid, &books, &flows);
+  runner.EnableLive(0); runner.EnableLocal(100000, 20000);
+  const int64_t open = int64_t(kMarketOpenMs) * 1000000;
+  EventRec ev{}; ev.symbol = 1; ev.channel = 1; ev.order_type = kSzOrderLimit;
+  ev.time_ms = kMarketOpenMs - 1; ev.volume = 100;
+  ev.ref1 = 1; ev.side = kSideBuy; ev.px_tick = 100000; runner.OnEvent(ev, open - 2);
+  ev.ref1 = 2; ev.side = kSideSell; ev.px_tick = 100200; runner.OnEvent(ev, open - 1);
+  // Exchange pre-open, receive post-open: different flow eligibility and return seeds.
+  ev.ref1 = 3; ev.side = kSideBuy; ev.px_tick = 100100; runner.OnEvent(ev, open + 1);
+  runner.CloseLocal(kAmOpenMs);
+  auto& first = *runner.local();
+  check(first.output.bases[0] == 1 && first.output.bases[2] == 100);
+  check(first.ret == std::log(10.015) - std::log(10.01));
+  check(first.age == .499999999);
+  check(runner.seed_mid() == 10.015);
+  // One nanosecond after the cutoff must go into the second LOCAL bucket.
+  ev.ref1 = 4; ev.time_ms = kAmOpenMs; ev.px_tick = 100150;
+  runner.OnEvent(ev, open + 500000001);
+  runner.CloseLocal(kAmOpenMs + 500); runner.CloseThrough(1);
+  check(runner.local()->output.bases[2] == 100);
+  check(flows.size() == 1 && flows[0].ep_ms == kAmOpenMs && flows[0].bases[2] == 100);
+  runner.CloseLocal(kAmOpenMs + 1000);
+  check(runner.local()->output.bases[2] == 0 && runner.local()->ret == 0);
+  // A newly observed stock inherits local progress, including clock inversions,
+  // as if Huatai had precreated it with all reference stocks.
+  SymbolRunner unseen(1, 100000, 20000, grid, &books, &flows);
+  unseen.EnableLocal(100000, 20000, kAmOpenMs);
+  unseen.OnEvent(ev, open + 1); // inverted receive clock after first cutoff
+  unseen.CloseLocal(kAmOpenMs + 500);
+  check(unseen.local()->output.bases[2] == 100);
+}
+
 int main() {
+  local_clock_boundaries();
   // Includes exact endpoints, backwards timestamps, lunch, post-close updates,
   // and re-entry after post-close: the frozen capture must survive those updates.
   const std::vector<int32_t> times = {

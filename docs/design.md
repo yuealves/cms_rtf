@@ -1,4 +1,83 @@
-# cms_rtf 设计：index_500ms 的 CMS 批处理移植
+# cms_rtf 设计：index_500ms 的 CMS 移植
+
+## 当前 journal 实盘/回放契约（2026-10-13 双网格对齐）
+
+本节取代下方历史章节中“只实现 exch”“保留 CMS 收盘批次等待”和旧 latency
+定义。语义基准是 ht_idc / insight_yjj_test 实际源码 `546aba2fa733d4f7f7656af0572115287418b12d`：
+`engine.cpp:91–224,280–349`、`index_500ms/family.cpp:8–46`、
+`worker.cpp:104–184,235–353,374–497`、`state.cpp` 和 `arrow_stream_sink.cpp:96–175`。
+
+`--journal`（follow/replay）现在始终输出 `index_500ms_local.arrow` 与
+`index_500ms_exch.arrow`。`--out` 指定 exch；`--local-out` 可指定 local，默认
+为同目录 `index_500ms_local.arrow`（自定义 exch 文件名则用 `<stem>_local.arrow`）。
+二者都是最终 Arrow IPC stream，datetime[us 北京墙钟]、code 和原顺序的 106 个
+Float32；按华泰把 NaN/Inf 写成 null。没有逐股中间文件。原 `--input` DTYPE 和
+parquet 离线接口继续保留 exch-only 对照契约，不冒充双网格实盘入口。
+
+### 两套时钟和状态
+
+- local 使用 frame 的有效接收时间（extra_nano 优先），以纳秒精度划分右闭桶；
+  `t+1ns` 属于下一桶，不能先截断成毫秒。exch 使用行情的交易所时间。
+- 二者网格均为 `(09:30,11:30]`、`(13:00,15:00]`，步长 500ms。
+  每股只有一份盘口；local 在接收截止点读当前簿，exch 用交易所端点捕获。
+- 流量桶、SH 全天身份表、开盘 midpoint 前值、5s 滚动环分别独立。沪市某条
+  委托可在一个时钟会话内而在另一个会话外，不能共用计数/已知量状态。
+  沪市身份表仍用紧凑分页哈希；SZ 前序价检查保留业务序、交易所时间及到达时间
+  三个条件。local 使用单个最近已发布流量槽，没有历史 local 记录数组。
+- local 盘口 age 保留纳秒精度。固定 symbol 升序聚合、Float32 量化点与 106
+  列公式不变。新出现的股票继承已经发布的两路位置，等价于上游预创建成分股。
+  `EventRec` 56B 等既有磁盘 ABI 不变；内部队列额外携带 int64 接收时间。
+
+### 调度和关窗
+
+1. 接收时钟 cutoff 就是上述 28,800 个交易时段端点。第一条时间**严格大于**
+   cutoff 的帧到来时，先逐个处理所有到期 cutoff，再分发行情；恰好等于端点的
+   行情仍在当前桶。不因一次 read 含多个窗口而合并或跳过 cutoff。
+2. 每个普通 cutoff 先发布对应 local 窗，再检查 exch。每个已观察
+   `(exchange, channel)` 取最大交易所时间，跨通道取最小水位，水位**严格大于**
+   exch 端点才可发布。一个 cutoff 可发布零个或多个 exch 窗。
+3. 只有 **11:31、15:01** 两个显式定时 cutoff 可绕过水位，补齐对应会话。
+   60 秒是相对于 11:30/15:00 的会话结束宽限，不是每个窗口都有 60 秒超时。
+   删除 CMS 原有的收盘批次额外保留规则；水位已满足时按华泰立即允许发布。
+4. 午休不安排普通轮询。15:00 后如仍有帧，接收时钟每 500ms 继续检查 exch，
+   不再产 local 行。普通尾部轮询与显式定时点重合时先普通、后定时，两次各记日志。
+5. follow+wall 在读空、追平已提交帧后允许空闲时钟核销普通 cutoff 和会话定时点。
+   普通 cutoff 需 `< wall` 且 `>= 最大已读 frame 时间`；定时点需 `<= wall`；
+   15:00 后的尾部轮询仍只能由帧驱动。只接受与交易日一致的墙钟。
+6. 已发布 exch 窗不可改写；迟到事件仍更新盘口/身份和前序价，抑制已发布桶流量。
+   午休/收盘后的事件更新 SH 身份前先封该股的交易所会话桶，与上游顺序一致。
+7. EOF / 正常 stop 按华泰执行：检查最后真实帧的精确时刻；补完剩余普通 local
+   cutoff（FireRemaining）；最后用真实末帧时间再做一次 barrier。合成的普通
+   cutoff **不是**会话超时，不能强制补未来 exch 窗。盘中停止可能因此生成全天
+   local 文件，后半段为停止状态的延续，不能当作实际接收的完整交易日。
+   journal replay 仍要求输入有正常 END；读取/解码失败不补齐成功输出。
+
+### latency.log
+
+完全采用华泰主日志的统计边界和采样单位：每次引擎 cutoff 一条，第一列是
+**接收时钟 cutoff** 的 `HH:MM:SS.mmm`，第二列为毫秒（默认 6 位有效数字）。
+用 steady_clock 在发送 worker 关窗/屏障前开始计时，完成计算及聚合后先 Flush
+local、再 Flush exch，第二次 Flush 返回后立即结束计时，然后写并 flush 日志。
+包含排队、计算、聚合和 Arrow 写出；不包含等待下一帧/水位的时间，不测“末条行情
+接收→写出”，也没有 fsync。无输出行的 cutoff 也记一条；不按 exch 窗数重复计数。
+一个 cutoff 的全部 Arrow 行一起 flush，不沿用离线的 1024 端点自动拆批策略。
+
+删除原有逐窗口 read/recv 时间槽、每帧计时、latency.csv/meta.json 的生成。
+`scripts/summarize_latency.py <目录或 latency.log>` 默认只统计交易时段；旧 CSV
+只保留显式读取能力以复核历史报告。历史回放和线上必须各自统计，日志本身不再
+附带 phase 标签。部署的 run 隔离、拒绝覆盖旧输出和状态回执继续保留。
+
+### 内存与验收
+
+保留单份盘口、紧凑 SH 身份表、local 单槽和有预算的 exch 待聚合记录。新增 local
+身份状态是上游双网格语义需要，不能以共用身份状态省内存而改变流量。没有把历史
+数据转移到逐股中间文件。pending 256 MiB 约束的是待聚合 payload，不是整个进程。
+验收、实际前缀性能和统计范围见 [双网格验证](validation/20261013-huatai-alignment.md)。
+
+## 历史实现记录
+
+以下记录保留各阶段离线性能验证的背景；涉及当前 journal 的输出、关窗、EOF 和
+latency 时，以以上双网格契约为准。
 
 > 语义基准：light_rtf v2 `docs/design/families/index_500ms.md` +
 > `docs/design/note/index-500ms-semantics-mapping.md`（先读那两个）。本文只记录

@@ -85,10 +85,12 @@ APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap
 正常日 15:31 跟读追平后退出，要求有网关 END；当日无 journal 则空运行退出。
 启动过晚而原始页已被归档清理会明确失败，不能只从中间页恢复簿。
 
-输出是单个最终 Arrow stream（106 Float32 因子 + 两个键），没有逐股中间文件：
+输出为 local/exch 两个最终 Arrow stream（各 106 Float32 因子 + 两个键），没有逐股中间文件：
 
 ```
 data/index_500ms/YYYYMMDD/runs/<时间-PID>/index_500ms_exch.arrow
+data/index_500ms/YYYYMMDD/runs/<时间-PID>/index_500ms_local.arrow
+data/index_500ms/YYYYMMDD/runs/<时间-PID>/latency.log
 data/index_500ms/YYYYMMDD/current -> runs/<时间-PID>
 ```
 
@@ -96,32 +98,37 @@ data/index_500ms/YYYYMMDD/current -> runs/<时间-PID>
 输入/迟到/中断计数、进程 RSS 峰值和状态。读取正在增长的 Arrow 时，消费者必须
 按完整 record batch 读取并等待尾部，不将暂时没有字节视为全天 EOF。
 重启创建新 run，追平并发布首批后再切换日期 current，旧结果不覆盖。
-失败或盘中人工 stop 保留已写结果，状态标记 failed/stopped，不补造未来窗口。
+失败保留已写前缀，状态标记 failed。正常 stop 按华泰 FireRemaining 补完 local 普通
+网格，状态标记 stopped；exch 仍需水位/已经到期的会话定时点。盘中 stop 后的 local
+尾部只是停止状态的延续，不能当作完整交易日的实际观测。
 恢复时读首帧重建，需约一个历史追赶周期；没有跨进程内存快照。
 
 ### 盘中延迟监控
 
-journal 入口默认在最终 Arrow 同目录生成 `latency.log`、`latency.csv` 和
-`latency.meta.json`。`latency.log` 为“交易所窗口端点 + 关窗至 Arrow flush 的
-毫秒数”，可直接 tail。你关心的最后一条行情到因子写出，在 CSV 的
-`last_recv_to_write_ms`（网关接收起算）和 `last_read_to_write_ms`（cms_rtf
-读到 committed frame 起算）里。当前只输出 exch 因子，尚无 local 因子流。
+journal 入口默认在两路 Arrow 同目录生成 `latency.log`：
+
+```text
+09:30:00.500 3.12345
+09:30:01.000 2.87654
+```
+
+第一列是接收时钟 cutoff，第二列是从关窗触发到 local/exch 两路 Arrow 都 Flush
+完成的 **毫秒**。完全采用华泰的 cutoff 采样；每个 cutoff 一条，包括本次没有
+exch 行的情况。不包含等待下一条行情或等待通道水位的时间，不表示末条行情的
+接收至写出延迟。日志本身的写入不计入本条耗时，Arrow Flush 不含 fsync。
+不再生成 latency.csv/meta.json，避免混用此前的逐 exch 窗统计口径。
 
 ```bash
 # 日期 current 在追平后指向本次 run；启动追赶期间可从 status.sh 查看 attempt。
 tail -f /data/cms/rtf/data/index_500ms/20261013/current/latency.log
 python3 /data/cms/rtf/current/scripts/summarize_latency.py \
-  /data/cms/rtf/data/index_500ms/20261013/current/latency.csv \
-  --phase tail --reason watermark
+  /data/cms/rtf/data/index_500ms/20261013/current/latency.log
 ```
 
-统计包含 mean/P50/P95/P99/P999/max，单位全部是 ms。默认排除无当前窗口行情的
-空桶；盘中正常水位关窗、收盘定时收尾、启动追赶和离线 replay 分开。历史回放中
-`last_recv_to_write_ms` 留空，不能拿历史 recv_ns 减当前时间来报告实时延迟。
-catchup 阶段的接收延迟可能包含历史数据年龄；排查时可去掉 phase 过滤查看。
-Arrow flush 表示完整 batch 已可读取，没有额外 fsync；详见 design.md 的计时边界。
-8 worker 的 gy_dev/招商验证、华泰盘中对照和日志开销见
-[延迟日志验收记录](validation/20261013-latency.md)。
+统计包含 mean/P50/P95/P99/P999/max，单位全部是 ms。默认排除交易时段外的
+收盘空转日志；`--session all` 可包含它们。主日志与华泰一样没有 phase 标签，
+追赶/全速回放须单独运行、单独统计，不能把收盘空闲值或回放值当成盘中实盘值。
+详细规则和新验收见 [双网格对齐记录](validation/20261013-huatai-alignment.md)。
 
 `crontab.example` 只提供 09:12 启动示例；部署不会自动修改 crontab 或启动业务。
 实际安装定时任务须保留网关原有条目，并按工作区规则先备份。
@@ -135,6 +142,7 @@ build/cms_index500ms_mt --journal <已停止的日期目录> --journal-mode repl
 ```
 
 使用 journal 中的原始有效时间（extra_nano 优先）推进定时器，不用回放机器墙钟。
-到 EOF 仍要求最后会话有 END，不人为补齐未到时间的未来窗口。
+到 EOF 仍要求最后会话有 END；随后按华泰补剩余 local 普通 cutoff、做末帧 barrier。
+这些合成 cutoff 不创建未来的 exch 会话超时。
 原 `--input` DTYPE 回放及其逐位基准保持不变。实盘迟到策略与无限等待的离线基准
 有明确边界，见 design.md；不能把二者的整日逐位相等当成无条件保证。

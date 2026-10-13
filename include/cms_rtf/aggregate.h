@@ -1,7 +1,6 @@
 #pragma once
 #include <array>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -28,6 +27,7 @@ std::vector<int32_t> Grid();
 int64_t DayStart(const std::string& day);
 // Each caller adds stocks in ascending symbol order; never reduce worker sums.
 void AddBookValue(const BookRec* r, double ret, int32_t ep, double weight, Endpoint& out);
+void AddBookValueAtAge(const BookRec* r, double ret, double age, double weight, Endpoint& out);
 void AddFlowValue(const FlowRec& r, double weight, Endpoint& out);
 class RollingFinalizer {
  public:
@@ -39,9 +39,9 @@ class RollingFinalizer {
 // Commit atomically publishes it only after the whole input has succeeded.
 class ArrowOutput {
  public:
-  ArrowOutput(const std::string& path, int64_t day0, bool live = false);
+  // Huatai mode: NaN/Inf -> null, retain this cutoff's rows until explicit Flush.
+  ArrowOutput(const std::string& path, int64_t day0, bool live = false, bool huatai_cutoffs = false);
   ~ArrowOutput();
-  void SetFlushObserver(std::function<void(const std::vector<int32_t>&)> observer);
   void Append(int32_t ep, const WindowRows& rows);
   void Flush();
   void Commit();

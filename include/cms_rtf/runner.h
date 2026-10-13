@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include "cms_rtf/book.h"
@@ -58,7 +59,48 @@ class SymbolRunner {
                RecordSink* sink)
       : SymbolRunner(symbol, xl, m, grid, nullptr, nullptr) { sink_ = sink; }
 
-  void OnEvent(const EventRec& ev) {
+  struct LocalState {
+    explicit LocalState(double xl, double m) : flow(xl, m) {}
+    SymbolFlow flow;
+    BookRec book{};
+    FlowRec published{}, output{}; // Huatai's single latest published local bucket
+    int64_t last_act_ns = -1, cached_event_ns = -1;
+    double previous_mid = std::numeric_limits<double>::quiet_NaN();
+    double ret = std::numeric_limits<double>::quiet_NaN(), age = 0;
+  };
+  void EnableLocal(double xl, double m, int32_t closed_endpoint = -1) {
+    local_ = std::make_unique<LocalState>(xl, m);
+    // Huatai precreates reference stocks and advances even those with no events.
+    if (closed_endpoint >= 0)
+      local_->flow.CloseThrough(closed_endpoint, [](int32_t, const double*) {});
+  }
+  const LocalState* local() const { return local_.get(); }
+  void CloseLocal(int32_t endpoint) {
+    auto& s = *local_;
+    s.flow.CloseThrough(endpoint, [&](int32_t ep, const double* bases) {
+      s.published.ep_ms = ep; std::memcpy(s.published.bases, bases, sizeof(s.published.bases));
+    });
+    s.output = FlowRec{};
+    if (s.published.ep_ms == endpoint) s.output = s.published;
+    if (s.last_act_ns >= 0 && s.last_act_ns == s.cached_event_ns) {
+      s.ret = 0.0;
+    } else {
+      auto snap = book_.Capture();
+      snap.valid = snap.valid && RefInScope(symbol_);
+      s.book.mid = ComputeBookFeatures(snap, s.book.feat);
+      s.book.valid = std::isfinite(s.book.mid) && s.last_act_ns >= 0;
+      s.book.act_ms = s.last_act_ns >= 0 ? s.last_act_ns / 1000000 : -1;
+      s.ret = std::isfinite(s.book.mid) && std::isfinite(s.previous_mid)
+          ? std::log(s.book.mid) - std::log(s.previous_mid)
+          : std::numeric_limits<double>::quiet_NaN();
+      s.previous_mid = s.book.mid;
+      s.cached_event_ns = s.last_act_ns;
+    }
+    s.age = s.last_act_ns >= 0 ? (double(int64_t(endpoint) * 1000000) - double(s.last_act_ns)) / 1e9
+                              : std::numeric_limits<double>::quiet_NaN();
+  }
+
+  void OnEvent(const EventRec& ev, int64_t local_ns = -1) {
     // 1) 捕获封口（事件前簿）
     const int pos = static_cast<int>(
         std::lower_bound(grid_.begin(), grid_.end(), ev.time_ms) - grid_.begin());
@@ -78,7 +120,19 @@ class SymbolRunner {
     //    不更新捕获——与引擎 CaptureExchange 的 pos>=size 早退一致）
     book_.OnEvent(ev);
     flow_.OnEvent(ev, [this](int32_t ep, const double* bases) { EmitFlow(ep, bases); },
-                  !live_ || published_end_ == 0 || ev.time_ms > grid_[published_end_ - 1]);
+                  !live_ || published_end_ == 0 || ev.time_ms > grid_[published_end_ - 1], local_ns);
+    if (local_) {
+      local_->flow.OnLocalEvent(ev, local_ns, [&](int32_t ep, const double* bases) {
+        local_->published.ep_ms = ep;
+        std::memcpy(local_->published.bases, bases, sizeof(local_->published.bases));
+      });
+      local_->last_act_ns = local_ns;
+      if (local_ns <= int64_t(kMarketOpenMs) * 1000000) {
+        auto snap = book_.Capture();
+        double unused[31];
+        local_->previous_mid = ComputeBookFeatures(snap, unused);
+      }
+    }
     last_act_ms_ = ev.time_ms;
     if (in_grid) {
       cap_.act_ms = last_act_ms_;
@@ -119,8 +173,8 @@ class SymbolRunner {
   const BookHealth& health() const { return book_.health(); }
   int64_t non_monotonic() const { return flow_.non_monotonic(); }
   size_t live_orders() const { return book_.live_orders(); }
-  size_t sh_order_identities() const { return flow_.sh_order_identities(); }
-  size_t sh_identity_capacity_bytes() const { return flow_.sh_identity_capacity_bytes(); }
+  size_t sh_order_identities() const { return flow_.sh_order_identities() + (local_ ? local_->flow.sh_order_identities() : 0); }
+  size_t sh_identity_capacity_bytes() const { return flow_.sh_identity_capacity_bytes() + (local_ ? local_->flow.sh_identity_capacity_bytes() : 0); }
 
  private:
   void CapturePending() {
@@ -163,6 +217,7 @@ class SymbolRunner {
   int32_t symbol_;
   SymbolBook book_;
   SymbolFlow flow_;
+  std::unique_ptr<LocalState> local_;
   const std::vector<int32_t>& grid_;
   std::vector<BookRec>* book_out_;
   std::vector<FlowRec>* flow_out_;
