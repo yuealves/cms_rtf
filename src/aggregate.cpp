@@ -28,7 +28,6 @@
 #include "cms_rtf/aggregate.h"
 
 namespace cms_rtf::aggregation {
-using Clock = std::chrono::steady_clock;
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 constexpr double kMinCoverage = 0.8;
 void Check(const arrow::Status& s) {
@@ -37,9 +36,6 @@ void Check(const arrow::Status& s) {
 template<class T> T Value(arrow::Result<T> r) {
   if (!r.ok()) throw std::runtime_error(r.status().ToString());
   return std::move(*r);
-}
-double Seconds(Clock::time_point start) {
-  return std::chrono::duration<double>(Clock::now() - start).count();
 }
 template<class T> void Read(std::istream& in, T& v) {
   if (!in.read(reinterpret_cast<char*>(&v), sizeof(v)))

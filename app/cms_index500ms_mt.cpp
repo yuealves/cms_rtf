@@ -1,13 +1,13 @@
 // cms_index500ms_mt：多线程批处理/实盘同构的指数 500ms 因子引擎。
 //
 //   [exporter DTYPE 流] → reader 线程（顺序读 + 映射）→ symbol hash 分发
-//   → N 个 worker 线程（各自 symbol 子集的每股状态机）→ per-worker 记录文件
+//   → N 个 worker（每股状态机）→ 内存窗口聚合 → 最终 Arrow（stream 模式）
 //
 // 线程模型照华泰 light_rtf（dispatcher/SymbolWorker/固定顺序聚合）；
 // 聚合在 C++ 侧按 symbol 升序汇总 ⇒ 输出与 worker 数无关（位级一致）。
 //
 // 输入：cms_journal_export 的 128B DTYPE 行流（文件；头部 CMSPQ01\0 自动跳过）。
-// 输出：work_dir/w{i}.{book,flow}.cmsb + w{i}.seeds.bin；legacy 模式输出 .bin。
+// stream 输出：单个最终 Arrow；blocks/legacy 显式保留离线记录文件作对照。
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -38,6 +38,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <mutex>
+#include <poll.h>
 
 namespace {
 
@@ -251,6 +252,9 @@ int Run(int argc, char** argv) {
     if (item.first < 0 || item.first >= static_cast<int32_t>(dispatch.size())) {
       std::cerr << "threshold symbol outside six-digit universe\n"; return 1;
     }
+#ifdef CMS_RTF_HAS_ARROW
+    if (streaming && !reference->weights.count(item.first)) continue;
+#endif
     dispatch[item.first] = (static_cast<uint32_t>(item.first) * 2654435761u) % workers;
   }
   const auto started = std::chrono::steady_clock::now();
@@ -500,6 +504,14 @@ int Run(int argc, char** argv) {
   bool input_error = false;
   try {
   while (!worker_failed.load(std::memory_order_relaxed)) {
+    if (streaming && input_path == "-") {
+      // A worker can reject a stalled watermark while its upstream producer is
+      // idle. Do not leave the consumer stuck in read(), hiding that failure.
+      pollfd descriptor{fileno(in), POLLIN, 0};
+      const int ready = ::poll(&descriptor, 1, 100);
+      if (ready < 0 && errno != EINTR) { input_error = true; break; }
+      if (ready <= 0) continue;
+    }
     ssize_t received;
     do {
       received = ::read(fileno(in), reinterpret_cast<char*>(rows.data()) + carry,

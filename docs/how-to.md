@@ -85,6 +85,28 @@ PYTHONPATH=python python3 -m cms_rtf.run_journal_mt \
 `intermediate/export.summary.json`、`export.stderr.log` 和 `kernel.summary.json`
 分别保留导出质量计数、诊断日志和内核统计。
 
+原生多线程默认 `--output-mode stream`，窗口贡献在内存中聚合后释放，直接写最终
+Arrow，没有 `w*.book/flow/seeds` 文件。`--window-batch 64` 为加速 replay 的批量
+关窗调度；逐可用端点发布可改为 `1`，500ms 因子本身的粒度不变。
+`--pending-mib 128` 是待聚合 payload 预算，按 worker 均分；水位停滞超限会报错，
+不会自动写磁盘。遇到已关窗迟到事件也报错，旧 `--output-mode blocks` 可作诊断对照。
+只有 exporter 与 kernel 都成功，正式 Arrow 才被替换；运行中的临时名称文件
+就是最终 Arrow 格式。已有的逐股对照文件不会被用于新路径的聚合。
+
+与上一版分块落盘路径做同机交替对照（计时不含 exporter）：
+
+```bash
+PYTHONPATH=python python3 scripts/benchmark_stream.py \
+  --input <stream.bin> --workers 16 --repeats 2 \
+  --baseline-kernel <旧 worktree>/build/cms_index500ms_mt \
+  --baseline-aggregator <旧 worktree>/build/cms_index500ms_aggregate \
+  --weights-dir <权重目录> --threshold-dir <阈值目录> \
+  --reference <已验收 CMS Arrow> --out <新的基准目录>
+```
+
+逐进程 `/usr/bin/time -v` 记录峰值 RSS，`/proc` 采样区分匿名/文件页；比较完整耗时、
+106 列有效值位模式、空值掩码、键、健康计数以及逐股中间文件字节数。
+
 对同一份 replay DTYPE 流比较旧版和新版，输出目录必须尚不存在：
 
 ```bash

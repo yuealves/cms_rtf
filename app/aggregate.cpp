@@ -139,20 +139,7 @@ void AddBook(int32_t symbol, const std::vector<BookRec>& records, const Referenc
       const BookRec* r = selected[e];
       if (!r || !std::isfinite(r->mid) || r->act_ms < 0) continue;
       auto& a = out[idx][e];
-      for (int c = 0; c < 31; ++c) {
-        if (std::isfinite(r->feat[c])) {
-          a.num[c] += w * r->feat[c];
-          a.den[c] += w;
-        }
-      }
-      if (std::isfinite(returns[e])) {
-        a.num[31] += w * returns[e];
-        a.den[31] += w;
-      }
-      a.valid_weight += w;
-      const double age = (static_cast<int64_t>(grid[e]) - r->act_ms) / 1000.0;
-      a.age += w * age;
-      if (age < 0.5) a.fresh += w;
+      AddBookValue(r, returns[e], grid[e], w, a);
     }
   }
 }
@@ -165,16 +152,11 @@ void AddFlow(int32_t symbol, const std::vector<FlowRec>& records, const Referenc
     const auto ep = std::lower_bound(grid.begin(), grid.end(), r.ep_ms);
     if (ep == grid.end() || *ep != r.ep_ms) throw std::runtime_error("flow endpoint outside grid");
     const size_t e = ep - grid.begin();
-    const double* b = r.bases;
-    const bool active[3] = {((b[0] + b[1]) + b[2]) + b[3] > 0,
-                            ((b[9] + b[10]) + b[11]) + b[12] > 0,
-                            ((b[13] + b[14]) + b[15]) + b[16] > 0};
     for (int idx = 0; idx < kNumIndices; ++idx) {
       const double w = weights->second[idx];
       if (w <= 0) continue;
       auto& a = out[idx][e];
-      for (int c = 0; c < kNumBases; ++c) a.flow[c] += w * b[c];
-      for (int c = 0; c < 3; ++c) if (active[c]) a.active[c] += w;
+      AddFlowValue(r, w, a);
     }
   }
 }
@@ -224,14 +206,17 @@ int Run(int argc, char** argv) {
   t = Clock::now();
   RollingFinalizer finalizer;
   ArrowOutput output_stream(output, day0);
-  const double finalize_s = 0;
+  double finalize_s = 0;
   for (int e = 0; e < kNumEndpoints; ++e) {
     std::array<Endpoint, kNumIndices> window;
     for (int i = 0; i < kNumIndices; ++i) window[i] = acc[i][e];
-    output_stream.Append(grid[e], finalizer.Publish(e, window, ref));
+    const auto finalize_started = Clock::now();
+    const auto row = finalizer.Publish(e, window, ref);
+    finalize_s += Seconds(finalize_started);
+    output_stream.Append(grid[e], row);
   }
   output_stream.Commit();
-  const double write_s = Seconds(t);
+  const double write_s = Seconds(t) - finalize_s;
   std::cout << "{\"rows\": " << kNumEndpoints * kNumIndices << ", \"book_records\": " << nbook
             << ", \"flow_records\": " << nflow << ", \"book_seconds\": " << book_s
             << ", \"flow_seconds\": " << flow_s << ", \"finalize_seconds\": " << finalize_s

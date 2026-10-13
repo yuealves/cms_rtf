@@ -57,6 +57,18 @@ def run_pipeline(export_cmd, kernel_cmd, inter, env, keep_stream=False):
     return json.loads(result.stdout), timings
 
 
+def run_publishing_pipeline(export_cmd, kernel_cmd, inter, env, output, keep_stream=False):
+    """The pending file contains final Arrow rows; publish only after both exits."""
+    output = Path(output)
+    pending = output.with_name(f'.{output.name}.pending.{os.getpid()}')
+    try:
+        result = run_pipeline(export_cmd, kernel_cmd + ['--out', str(pending)], inter, env, keep_stream)
+        pending.replace(output)
+        return result
+    finally:
+        pending.unlink(missing_ok=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--journal', required=True)
@@ -123,18 +135,14 @@ def main():
     arrow_path = out_dir / 'index_500ms_exch.arrow'
     # A producer can return failure after writing valid, complete rows. Publish
     # only after BOTH stages succeed; the pending file is the final Arrow itself.
-    pending_arrow = out_dir / f'.index_500ms_exch.pending.{os.getpid()}.arrow'
     if output_mode == 'stream':
         reference = inter / 'reference.bin'
         native_aggregate.write_reference(ref, reference)
-        kernel_cmd += ['--ref', str(reference), '--day', args.day, '--out', str(pending_arrow),
+        kernel_cmd += ['--ref', str(reference), '--day', args.day,
                        '--window-batch', str(args.window_batch), '--pending-mib', str(args.pending_mib)]
-    try:
+        health, stages = run_publishing_pipeline(export_cmd, kernel_cmd, inter, env, arrow_path, args.keep_stream)
+    else:
         health, stages = run_pipeline(export_cmd, kernel_cmd, inter, env, args.keep_stream)
-        if output_mode == 'stream':
-            pending_arrow.replace(arrow_path)
-    finally:
-        pending_arrow.unlink(missing_ok=True)
     timings.update({k: round(v, 3) for k, v in stages.items()})
     (inter / 'kernel.summary.json').write_text(json.dumps(health, indent=2) + '\n')
     print(json.dumps(dict(stage='export_kernel', timings=timings, **health)), flush=True)

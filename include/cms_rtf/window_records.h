@@ -30,6 +30,12 @@ class WindowRecords : public RecordSink {
     *pending_ -= book_pos * sizeof(BookRec) + flow_pos * sizeof(FlowRec);
     books.erase(books.begin(), books.begin() + book_pos);
     flows.erase(flows.begin(), flows.begin() + flow_pos);
+    // Keep ordinary batches reusable; don't retain a pathological channel-lag
+    // allocation for every stock after those pending windows have been consumed.
+    if (books.capacity() > 256 && books.size() * 4 < books.capacity())
+      std::vector<BookRec>(books).swap(books);
+    if (flows.capacity() > 256 && flows.size() * 4 < flows.capacity())
+      std::vector<FlowRec>(flows).swap(flows);
     book_pos = flow_pos = 0;
   }
  private:

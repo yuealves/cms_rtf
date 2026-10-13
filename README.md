@@ -13,7 +13,8 @@ datetime[us 北京墙钟] + code + 106×Float32，NaN→null）。
 语义基准：light_rtf v2 的 index_500ms family。本项目是它的
 **CMS 数据源批处理移植**：同一套 106 列定义、同一套簿/流量/聚合语义，但
 - 只有交易所网格（local 网格不实现——不同采集机的接收时间本来也不可比）；
-- 批量处理全天，无实时水位/关窗逻辑（全量历史 ⇒ 28,800 端点全发布）。
+- 多线程 journal 路径按通道水位关闭窗口，EOF 补齐 28,800 端点；目前的驱动用于
+  replay，尚未包含 journal 实时跟随与实盘会话定时器。
 
 ## 架构
 
@@ -30,10 +31,15 @@ python/cms_rtf/run_day.py    日级驱动；--compare 生成对拍报告
 C++ 与 Python 之间用二进制文件接口（`events.bin`/`book.bin`/`flow.bin`/`seeds.bin`，
 布局与 `include/cms_rtf/events.h` 的结构体逐字节一致、有 static_assert 守护）。
 
-多线程 journal 驱动 `cms_rtf.run_journal_mt` 默认将内核结果分块写入
-`w*.book.cmsb` / `w*.flow.cmsb`，避免在内存中留存全天结果；C++ 聚合读取版本化索引。
-`--aggregate-backend python` 自动使用旧稠密 `.bin` 格式，内核也可显式指定
-`--output-mode legacy` 对照。格式与实盘接入边界见 [设计说明](docs/design.md)。
+多线程 journal 驱动 `cms_rtf.run_journal_mt` 默认使用 `--output-mode stream`：
+逐股贡献在内存内按窗口聚合、消费后释放，直接写最终 Arrow；**不生成逐股中间文件**。
+`--window-batch 64` 批量调度 replay 窗口，`1` 可逐可用端点发布。`--pending-mib 128`
+限制待聚合记录 payload；通道停滞超预算或出现已关窗的迟到事件会报错，不丢弃数据。
+正式 Arrow 文件名只在 producer 和 consumer 都成功后替换，运行中写的是同一份
+最终格式 Arrow 的临时名称。全部边界见 [设计说明](docs/design.md)。
+
+显式 `--output-mode blocks` 保留 `.cmsb` 中间文件对照；`--aggregate-backend python`
+自动使用旧 `.bin` 路径。单线程 parquet 驱动仍使用原有离线接口。
 
 ## 构建与测试
 

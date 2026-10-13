@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 import unittest
 
@@ -11,6 +12,7 @@ import pyarrow as pa
 from cms_rtf import native_aggregate
 from cms_rtf.journal_events import JOURNAL_DTYPE
 from cms_rtf.validate_replay import exact_factors
+from cms_rtf.run_journal_mt import run_publishing_pipeline
 import test_journal_pipeline as fixture
 
 
@@ -120,10 +122,40 @@ class StreamAggregateTest(unittest.TestCase):
         rows['exchange_time_raw'] = 20261009000000000 + hhmmssmmm
         dest = self.root / 'stalled'
         cmd = self.command(dest) + ['--pending-mib', '1', '--input', '-']
-        result = subprocess.run(cmd, input=b'CMSPQ01\0' + rows.tobytes(), capture_output=True, timeout=30)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'pending window budget exceeded', result.stderr)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            try:
+                proc.stdin.write(b'CMSPQ01\0' + rows.tobytes()); proc.stdin.flush()
+            except BrokenPipeError:
+                pass
+            # Leave upstream open and idle: worker failure must interrupt the
+            # consumer's input wait without relying on producer EOF.
+            self.assertNotEqual(proc.wait(timeout=10), 0)
+            self.assertIn(b'pending window budget exceeded', proc.stderr.read())
+        finally:
+            if proc.poll() is None: proc.kill(); proc.wait()
+            try: proc.stdin.close()
+            except BrokenPipeError: pass
+            proc.stdout.close(); proc.stderr.close()
         self.assertFalse(list(dest.iterdir()))
+
+    def test_integrated_producer_failure_preserves_previous_output(self):
+        self.prepare()
+        dest = self.root / 'producer'
+        cmd = self.command(dest)
+        pos = cmd.index('--out'); del cmd[pos:pos + 2]
+        final = dest / 'factors.arrow'; final.write_bytes(b'accepted')
+        exporter = [sys.executable, '-c',
+                    'import pathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes());sys.exit(int(sys.argv[2]))',
+                    str(self.root / 'input')]
+        with self.assertRaisesRegex(RuntimeError, 'exporter=7'):
+            run_publishing_pipeline(exporter + ['7'], cmd, dest, os.environ.copy(), final)
+        self.assertEqual(final.read_bytes(), b'accepted')
+        self.assertFalse(list(dest.glob('.*pending*')))
+        for keep in [False, True]:
+            health, _ = run_publishing_pipeline(exporter + ['0'], cmd, dest, os.environ.copy(), final, keep)
+            self.assertEqual(health['emitted_endpoints'], 28800)
+            self.assertEqual(pa.ipc.open_stream(final).read_all().num_rows, 115200)
 
 
 if __name__ == '__main__':
