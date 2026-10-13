@@ -40,6 +40,8 @@ C++ 与 Python 之间用二进制文件接口（`events.bin`/`book.bin`/`flow.bi
 
 显式 `--output-mode blocks` 保留 `.cmsb` 中间文件对照；`--aggregate-backend python`
 自动使用旧 `.bin` 路径。单线程 parquet 驱动仍使用原有离线接口。
+全天性能、内存、逐窗口调度开销及实盘接入边界见
+[内存聚合验收记录](docs/validation/20261013-in-memory-aggregate.md)。
 
 ## 构建与测试
 
