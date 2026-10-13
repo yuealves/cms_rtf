@@ -23,7 +23,7 @@ class PendingPool {
   size_t limit_;
   std::atomic<size_t> reserved_{0};
 };
-class PendingBudget {
+class alignas(64) PendingBudget {
  public:
   explicit PendingBudget(PendingPool* pool) : pool_(pool) {}
   void Add(size_t bytes) {

@@ -164,6 +164,7 @@ struct WorkerCtx {
   BookHealth health;
   int64_t nonmono = 0;
   int64_t events = 0;
+  double event_seconds = 0, close_seconds = 0;
   uint64_t output_capacity_at_eof = 0, sh_identities = 0, identity_capacity = 0, live_orders = 0;
 };
 
@@ -279,6 +280,7 @@ int Run(int argc, char** argv) {
     ctx->thread = std::thread([&, i, ctx = ctx.get()]() {
       try {
       std::array<EventRec, kBatchSize> batch;
+      unsigned idle_polls = 0;
       const std::string prefix = work_dir + "/w" + std::to_string(i);
       std::unique_ptr<BlockWriter<BookRec>> books;
       std::unique_ptr<BlockWriter<FlowRec>> flows;
@@ -289,7 +291,8 @@ int Run(int argc, char** argv) {
       auto finish_all = [&]() {
         if (streaming) {
           for (auto& [symbol, runner] : ctx->states) {
-            (void)symbol;
+            const auto& window = *ctx->windows.at(symbol);
+            ctx->output_capacity_at_eof += window.books.capacity() * sizeof(BookRec) + window.flows.capacity() * sizeof(FlowRec);
             ctx->sh_identities += runner->sh_order_identities();
             ctx->identity_capacity += runner->sh_identity_capacity_bytes();
             ctx->live_orders += runner->live_orders();
@@ -364,18 +367,28 @@ int Run(int argc, char** argv) {
           count = ctx->ring.pop_batch(batch.data(), batch.size());
           if (!count) break;
         }
-        if (!count) { std::this_thread::yield(); continue; }
+        if (!count) {
+          if (streaming && ++idle_polls > 8) std::this_thread::sleep_for(std::chrono::microseconds(25));
+          else std::this_thread::yield();
+          continue;
+        }
+        idle_polls = 0;
+        const auto batch_started = std::chrono::steady_clock::now();
+        double marker_seconds = 0;
         for (size_t k = 0; k < count; ++k) {
           const EventRec& ev = batch[k];
           if (ev.symbol < 0) {
+            const auto marker_started = std::chrono::steady_clock::now();
             for (auto& [symbol, runner] : ctx->states) {
               if (ev.symbol == -2) runner->Finish(); else runner->CloseThrough(ev.time_ms);
               ctx->windows.at(symbol)->seed_mid = runner->seed_mid();
             }
+            ctx->close_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - marker_started).count();
             std::unique_lock<std::mutex> lock(barrier_mu);
             ctx->closed_target.store(ev.time_ms, std::memory_order_release);
             closed_cv.notify_one();
             resumed_cv.wait(lock, [&] { return resumed_target.load() >= ev.time_ms || worker_failed.load(); });
+            marker_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - marker_started).count();
             continue;
           }
           auto it = ctx->states.find(ev.symbol);
@@ -402,6 +415,7 @@ int Run(int argc, char** argv) {
           it->second->OnEvent(ev);
           ++ctx->events;
         }
+        ctx->event_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - batch_started).count() - marker_seconds;
       }
       if (!worker_failed.load()) finish_all();
       } catch (...) {
@@ -426,9 +440,10 @@ int Run(int argc, char** argv) {
     pending_size[i] = 0;
   };
   int emitted = 0;
-  double merge_seconds = 0;
+  double merge_seconds = 0, barrier_seconds = 0, read_seconds = 0, map_seconds = 0;
   auto close_windows = [&](int end, bool eof) {
     if (end <= emitted || worker_failed.load()) return;
+    const auto barrier_started = std::chrono::steady_clock::now();
     for (int i = 0; i < workers; ++i) {
       flush(i);
       EventRec marker{};
@@ -445,6 +460,7 @@ int Run(int argc, char** argv) {
       });
     }
     if (worker_failed.load()) return;
+    barrier_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - barrier_started).count();
 #ifdef CMS_RTF_HAS_ARROW
     const auto merge_started = std::chrono::steady_clock::now();
     struct Member { const std::array<double, 4>* weights; WindowRecords* records; };
@@ -514,15 +530,18 @@ int Run(int argc, char** argv) {
       if (ready <= 0) continue;
     }
     ssize_t received;
+    const auto read_started = std::chrono::steady_clock::now();
     do {
       received = ::read(fileno(in), reinterpret_cast<char*>(rows.data()) + carry,
                         rows.size() * sizeof(DtypeRow) - carry);
     } while (received < 0 && errno == EINTR);
+    read_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - read_started).count();
     if (received < 0) { input_error = true; break; }
     const size_t bytes = static_cast<size_t>(received);
     const size_t total = bytes + carry;
     const size_t got = total / sizeof(DtypeRow);
     input_rows += got;
+    const auto map_started = std::chrono::steady_clock::now();
     for (size_t j = 0; j < got; ++j) {
       const int32_t sym = parse_symbol(rows[j].symbol);
       if (sym < 0 || sym >= static_cast<int32_t>(dispatch.size())) continue;
@@ -542,6 +561,7 @@ int Run(int argc, char** argv) {
       ++n_events;
     }
     for (int i = 0; i < workers; ++i) flush(i);
+    map_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - map_started).count();
     carry = total % sizeof(DtypeRow);
     if (carry) std::memmove(rows.data(), reinterpret_cast<char*>(rows.data()) +
                             got * sizeof(DtypeRow), carry);
@@ -608,13 +628,20 @@ int Run(int argc, char** argv) {
   if (streaming) arrow->Commit();
 #endif
   size_t pending_peak = 0;
+  double max_worker_event_seconds = 0, max_worker_close_seconds = 0;
   for (const auto& ctx : ctxs) pending_peak += ctx->pending_budget->peak();
+  for (const auto& ctx : ctxs) {
+    max_worker_event_seconds = std::max(max_worker_event_seconds, ctx->event_seconds);
+    max_worker_close_seconds = std::max(max_worker_close_seconds, ctx->close_seconds);
+  }
   const auto finished = std::chrono::steady_clock::now();
   const double dispatch_s = std::chrono::duration<double>(dispatched - started).count();
   const double total_s = std::chrono::duration<double>(finished - started).count();
   struct rusage usage{};
   getrusage(RUSAGE_SELF, &usage);
-  std::printf("{\"emitted_endpoints\": %d, \"merge_seconds\": %.6f, \"peak_pending_payload_bytes\": %zu, \"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
+  std::printf("{\"read_seconds\": %.6f, \"map_seconds\": %.6f, \"barrier_seconds\": %.6f, "
+              "\"max_worker_event_seconds\": %.6f, \"max_worker_close_seconds\": %.6f, "
+              "\"emitted_endpoints\": %d, \"merge_seconds\": %.6f, \"sum_worker_peak_pending_payload_bytes\": %zu, \"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
               "\"output_capacity_at_eof_bytes\": %" PRIu64 ", \"sh_identities_at_eof\": %" PRIu64 ", "
               "\"sh_identity_capacity_at_eof_bytes\": %" PRIu64 ", \"live_orders_at_eof\": %" PRIu64 ", "
               "\"input_rows\": %" PRId64 ", \"dispatch_seconds\": %.6f, "
@@ -623,6 +650,7 @@ int Run(int argc, char** argv) {
               ", \"unknown_trade_ref\": %" PRId64 ", \"late_passive_ref\": %" PRId64
               ", \"agg_skip\": %" PRId64 ", \"crossed_book\": %" PRId64
               ", \"immediate_fill\": %" PRId64 ", \"sz_non_monotonic\": %" PRId64 "}\n",
+              read_seconds, map_seconds, barrier_seconds, max_worker_event_seconds, max_worker_close_seconds,
               emitted, merge_seconds, pending_peak, output_mode.c_str(), usage.ru_maxrss, output_capacity, sh_identities, identity_capacity, live_orders,
               input_rows, dispatch_s, total_s, n_events, workers, spin_waits, total.over_deduct, total.d_unknown,
               total.unknown_trade_ref, total.late_passive_ref, total.agg_skip,

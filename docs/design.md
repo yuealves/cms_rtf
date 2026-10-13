@@ -209,3 +209,10 @@ EOF 的压缩 SH 身份表与活跃委托没有删除；最终 Arrow 的 batch �
 这会暂存收盘段尚未聚合的记录，预算由全部 worker 共享，64 KiB 额度批量领取，
 总 payload 上限默认 256 MiB。实际 vector 容量和全进程 RSS 另行实测。
 日内真正越过已发布窗口的事件仍明确拒绝；不会为了完成回放而静默丢弃。
+
+性能诊断细分 reader 的 read/map、屏障等待、聚合及 worker 处理/封口耗时。
+`sum_worker_peak_pending_payload_bytes` 是各 worker 各自峰值之和，不是假称同一时刻
+全局活跃 payload；`output_capacity_at_eof_bytes` 在 stream 模式记录消费后保留的
+vector 容量。worker 的预算计数器按 cache line 对齐；空队列先短暂 yield，连续
+空转后等待 25 微秒（有事件时恢复批量处理），减少 reader 工作时其他线程持续
+调用 sched_yield 的 CPU 开销。真实峰值仍以进程 RSS 实测为准。
