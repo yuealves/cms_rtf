@@ -41,11 +41,16 @@ def main():
                                   for suite in ('noble', 'noble-updates', 'noble-security')))
         apt += ['-o', 'Dir::Etc::sourcelist=' + str(sources), '-o', 'Dir::Etc::sourceparts=-',
                 '-o', 'Dir::State::lists=' + str(lists), '-o', 'Acquire::Languages=none',
+                '-o', 'Dir::Cache::pkgcache=' + str(cache / 'pkgcache.bin'),
+                '-o', 'Dir::Cache::srcpkgcache=' + str(cache / 'srcpkgcache.bin'),
                 '-o', 'APT::Sandbox::User=' + __import__('getpass').getuser(),
                 '-o', 'Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false']
         subprocess.run([*apt, 'update'], check=True)
+    # apt-get suppresses URIs for files already present in cwd. Query from an
+    # empty directory; reuse verified downloads ourselves in the separate cache.
+    query = cache / 'uri-query'; query.mkdir(exist_ok=True)
     lines = subprocess.check_output([*apt, '--print-uris', 'download', *PACKAGES],
-                                    cwd=cache, text=True).splitlines()
+                                    cwd=query, text=True).splitlines()
     specs = [shlex.split(s) for s in lines if s.startswith("'")]
     if len(specs) != len(PACKAGES):
         raise RuntimeError('incomplete APT package selection')
