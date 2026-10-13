@@ -42,6 +42,7 @@
 #include <csignal>
 #include "cms_rtf/dtype_row.h"
 #include "cms_rtf/journal_input.h"
+#include "cms_rtf/latency.h"
 
 namespace {
 
@@ -171,6 +172,7 @@ int Run(int argc, char** argv) {
   int workers = 8, window_batch = 64, pending_mib = 256;
   std::string reference_path, day, output;
   std::string journal_path, journal_mode = "follow", journal_clock = "wall";
+  std::string latency_mode = "auto";
   bool batch_specified = false;
   if (argc % 2 != 1) throw std::runtime_error("each option requires a value");
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -188,6 +190,7 @@ int Run(int argc, char** argv) {
     else if (k == "--journal") journal_path = v;
     else if (k == "--journal-mode") journal_mode = v;
     else if (k == "--journal-clock") journal_clock = v;
+    else if (k == "--latency") latency_mode = v;
     else { std::cerr << "unknown arg " << k << "\n"; return 2; }
   }
   const bool journal_input = !journal_path.empty();
@@ -205,6 +208,11 @@ int Run(int argc, char** argv) {
   }
 
   const bool streaming = output_mode == "stream";
+  if (latency_mode != "auto" && latency_mode != "on" && latency_mode != "off")
+    throw std::runtime_error("latency must be auto, on or off");
+  const bool track_latency = latency_mode == "on" || (latency_mode == "auto" && journal_input);
+  if (track_latency && !streaming) throw std::runtime_error("latency requires stream output");
+  std::unique_ptr<LatencyLog> latency;
 #ifdef CMS_RTF_HAS_ARROW
   std::unique_ptr<aggregation::Reference> reference;
   std::unique_ptr<aggregation::ArrowOutput> arrow;
@@ -214,6 +222,17 @@ int Run(int argc, char** argv) {
       throw std::runtime_error("stream output requires --ref, --day and --out");
     reference = std::make_unique<aggregation::Reference>(aggregation::ReadReference(reference_path));
     arrow = std::make_unique<aggregation::ArrowOutput>(output, aggregation::DayStart(day), follow);
+    if (track_latency) {
+      const std::string mode = follow ? "journal_follow_" + journal_clock :
+                              (journal_input ? "journal_replay" : "dtype_replay");
+      auto directory = std::filesystem::path(output).parent_path();
+      latency = std::make_unique<LatencyLog>(directory.empty() ? "." : directory.string(), mode);
+      arrow->SetFlushObserver([&](const std::vector<int32_t>& endpoints) {
+        const auto done_ns = SteadyNs();
+        const auto wall_ns = WallNs();
+        latency->Written(endpoints, done_ns, wall_ns);
+      });
+    }
   }
 #else
   if (streaming) throw std::runtime_error("rebuild with CMS_RTF_BUILD_AGGREGATE=ON for stream output");
@@ -262,7 +281,7 @@ int Run(int argc, char** argv) {
     // Arrow stores Beijing wall time without a timezone; journal clocks are UTC.
     journal_day0_ns = (aggregation::DayStart(day) - 8LL * 3600 * 1000000) * 1000;
 #endif
-    journal = std::make_unique<JournalInput>(journal_path, std::stoul(day), follow);
+    journal = std::make_unique<JournalInput>(journal_path, std::stoul(day), follow, track_latency);
     std::signal(SIGINT, Stop); std::signal(SIGTERM, Stop);
   }
   std::vector<int8_t> dispatch(1000000, -1);
@@ -458,10 +477,14 @@ int Run(int argc, char** argv) {
     pending_size[i] = 0;
   };
   int emitted = 0;
+  bool tail_phase = false;
   double merge_seconds = 0, barrier_seconds = 0, read_seconds = 0, map_seconds = 0;
-  auto close_windows = [&](int end, bool eof) {
+  auto close_windows = [&](int end, bool eof, const char* reason) {
     if (end <= emitted || worker_failed.load()) return;
     const auto barrier_started = std::chrono::steady_clock::now();
+    if (latency) latency->BeginClose(reason,
+        follow && journal_clock == "wall" ? (tail_phase ? "tail" : "catchup") : "replay",
+        std::chrono::duration_cast<std::chrono::nanoseconds>(barrier_started.time_since_epoch()).count());
     for (int i = 0; i < workers; ++i) {
       flush(i);
       EventRec marker{};
@@ -533,6 +556,7 @@ int Run(int argc, char** argv) {
   std::vector<int> channels;
   std::string input_failure;
   std::vector<DtypeRow> rows(journal_input ? 4096 : (1 << 16));
+  std::vector<int64_t> read_stamps(track_latency ? rows.size() : 0);
   int64_t n_events = 0, input_rows = 0, late_events = 0;
   size_t carry = has_magic ? 0 : prefix_size;
   if (carry) std::memcpy(rows.data(), prefix.data(), carry);
@@ -567,6 +591,7 @@ int Run(int argc, char** argv) {
         << ",\"caught_up\":" << (reader_caught_up ? "true" : "false")
         << ",\"peak_rss_kib\":" << usage.ru_maxrss
         << ",\"arrow_bytes\":" << (ignored ? 0 : bytes)
+        << ",\"latency_enabled\":" << (latency ? "true" : "false")
         << ",\"full_grid\":" << (emitted == kNumEndpoints ? "true" : "false") << "}\n";
     out.close(); std::filesystem::rename(tmp, path);
   };
@@ -588,9 +613,14 @@ int Run(int argc, char** argv) {
     // reader has drained all currently committed frames in follow mode.
     if ((watermark >= kAmCloseMs && watermark <= kPmOpenMs) || watermark >= kPmCloseMs)
       end = emitted;
-    if (clock_ms >= kAmCloseMs + 60000) end = std::max(end, kNumEndpoints / 2);
-    if (clock_ms >= kPmCloseMs + 60000) end = kNumEndpoints;
-    if (end > emitted) close_windows(end, false);
+    const char* reason = "watermark";
+    if (clock_ms >= kAmCloseMs + 60000 && end < kNumEndpoints / 2 && emitted < kNumEndpoints / 2) {
+      end = kNumEndpoints / 2; reason = "am_timer";
+    }
+    if (clock_ms >= kPmCloseMs + 60000 && emitted < kNumEndpoints) {
+      end = kNumEndpoints; reason = "pm_timer";
+    }
+    if (end > emitted) close_windows(end, false, reason);
   };
   try {
   write_status("running", true);
@@ -612,6 +642,7 @@ int Run(int argc, char** argv) {
         const auto result = journal->Next(rows[got]);
         if (result == JournalInput::Result::Idle) { idle = true; break; }
         if (result == JournalInput::Result::Eof) { eof = true; break; }
+        if (latency) read_stamps[got] = journal->read_steady_ns();
         ++got;
       }
       reader_caught_up = idle || eof;
@@ -624,6 +655,7 @@ int Run(int argc, char** argv) {
       if (received < 0) { input_error = true; break; }
       bytes = static_cast<size_t>(received); total = bytes + carry;
       got = total / sizeof(DtypeRow); input_rows += got;
+      if (latency) std::fill_n(read_stamps.begin(), got, SteadyNs());
     }
     read_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - read_started).count();
     const auto map_started = std::chrono::steady_clock::now();
@@ -638,6 +670,7 @@ int Run(int argc, char** argv) {
       const int worker = dispatch[sym];
       if (worker < 0) continue;
       const EventRec ev = map_row(rows[j], sym);
+      if (latency) latency->Observe(ev.time_ms, emitted, rows[j].recv_ns, read_stamps[j]);
       if (streaming) {
         if (emitted && ev.time_ms <= grid[emitted - 1]) {
           if (journal) ++late_events;
@@ -670,6 +703,7 @@ int Run(int argc, char** argv) {
         }
       }
       write_status("running");
+      if (idle) tail_phase = true;
       if (eof) { if (source_clock_ns) advance_clock(source_clock_ns, true); break; }
       if (idle) std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
@@ -682,11 +716,11 @@ int Run(int argc, char** argv) {
       for (const auto channel : channels) watermark = std::min(watermark, channel_time[channel]);
       const int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
       const bool closing_batch = (watermark >= kAmCloseMs && watermark <= kPmOpenMs) || watermark >= kPmCloseMs;
-      if (!closing_batch && end - emitted >= window_batch) close_windows(end, false);
+      if (!closing_batch && end - emitted >= window_batch) close_windows(end, false, "watermark");
     }
   }
   if (input_error) fail_workers();
-  if (streaming && !input_error && !journal_input) close_windows(kNumEndpoints, true);
+  if (streaming && !input_error && !journal_input) close_windows(kNumEndpoints, true, "eof");
   } catch (const std::exception& e) {
     input_failure = e.what();
     fail_workers();

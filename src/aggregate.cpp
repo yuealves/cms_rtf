@@ -179,6 +179,7 @@ struct ArrowOutput::Impl {
   std::vector<int32_t> endpoints;
   std::vector<WindowRows> rows;
   bool live;
+  std::function<void(const std::vector<int32_t>&)> flush_observer;
   Impl(const std::string& path, int64_t day, bool publish_live) : destination(path),
       temporary(publish_live ? path : path + ".tmp." + std::to_string(getpid())), day0(day), live(publish_live) {
     std::vector<std::shared_ptr<arrow::Field>> fields = {
@@ -207,6 +208,9 @@ struct ArrowOutput::Impl {
 ArrowOutput::ArrowOutput(const std::string& path, int64_t day0, bool live)
     : impl_(std::make_unique<Impl>(path, day0, live)) {}
 ArrowOutput::~ArrowOutput() = default;
+void ArrowOutput::SetFlushObserver(std::function<void(const std::vector<int32_t>&)> observer) {
+  impl_->flush_observer = std::move(observer);
+}
 uint64_t ArrowOutput::rows() const { return impl_->count; }
 void ArrowOutput::Append(int32_t ep, const WindowRows& rows) {
   impl_->endpoints.push_back(ep); impl_->rows.push_back(rows); impl_->count += kNumIndices;
@@ -235,6 +239,7 @@ void ArrowOutput::Flush() {
   }
   Check(p.writer->WriteRecordBatch(*arrow::RecordBatch::Make(p.schema, n, arrays)));
   Check(p.file->Flush());
+  if (p.flush_observer) p.flush_observer(p.endpoints);
   p.endpoints.clear(); p.rows.clear();
 }
 void ArrowOutput::Commit() {

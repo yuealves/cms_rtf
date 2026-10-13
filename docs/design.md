@@ -253,3 +253,44 @@ follow 直接创建新 Arrow 文件并逐批 flush；失败保留已发布前缀
 SHA256/前置条件、独立 Git worktree、目标机原生编译及测试后原子切换。
 用户级工具链和现有 Arrow 安装独立于系统包管理，不改网关/paged/cron。
 实现与操作见 docs/deploy-live.md，所有发布以 deployment.json 与构建日志为凭。
+
+## 窗口延迟日志（2026-10-13）
+
+参考 ht_idc 的 insight_yjj_test 容器 `/opt/insight/light_rtf_v2`，commit `546aba2`：
+`engine.cpp:179–205` 在 CloseOne 开始记录 steady_clock，
+`arrow_stream_sink.cpp:113–128` 在两路 Arrow Flush 后记录结束，写出的
+`latency.log` 第二列为 **毫秒**。它测关窗触发到写出，不是接收行情到写出的总延迟；
+该实现未调用 fsync，不能把注释里的 durable 理解为持久化到物理磁盘。
+
+cms_rtf 的 journal 路径默认开启 `--latency auto`，DTYPE 对照路径默认关闭；
+可显式 `--latency on|off`。Arrow 同目录新增 latency.log、latency.csv 和
+latency.meta.json，不修改因子目录或值。当前 CMS 只计算 exch 流；日志明确标记
+clock=exch，不因为记录了本地接收时间而声称新增 local 因子。
+
+- latency.log 两列为交易所窗口端点 HH:MM:SS.mmm、close_to_write_ms；与华泰
+  使用相同耗时边界，但华泰第一列是引擎 cutoff，不一定等于此次关闭的 exch 端点。
+- close_to_write_ms：发送 worker 关窗/排队屏障前，到相应 Arrow record batch
+  WriteRecordBatch 和 Flush 成功返回后，使用 steady_clock，包含排队、封口、聚合和写出。
+- last_read_to_write_ms：同一个右闭交易所窗口内，最后读到的有效成分股事件到写出，
+  使用 steady_clock。journal 在确认 frame committed 后、hash/解码前每帧采样一次；
+  同帧事件共用采样。DTYPE 以每个输入 read 完成时间为边界，回放的排队形态不同。
+- last_recv_to_write_ms：写出时 system_clock 减去该窗口有效成分股事件最大的
+  CMS gateway recv_ns，涵盖网关后排队、journal、读取、等待水位以及计算输出。
+  仅 follow+wall 记录；历史 replay/source 模式留空。墙钟回拨导致的负值原样记录，
+  不截断成零。catchup 阶段可包含数小时历史数据年龄，不能当成盘中实时表现。
+
+有效事件指通过参考成分股过滤、处于连续竞价时段且未落后已发布窗口的事件。
+已抑制迟到事件不能改写历史窗口的接收时间；空桶接收/read 延迟留空，不伪造为零。
+这是当前窗口行情的度量，不枚举 5 秒滚动状态和历史盘口的全部依赖。
+
+每个真实 Arrow Flush 回调记录完成时刻，覆盖自动 1024 端点刷新和显式刷新；
+同一批中的端点共享完成时刻，close_id/flush_id 标明分组，不按端点数摊薄耗时。
+日志本身的写入在结束采样之后，不包含在当前记录的延迟里；会产生少量真实开销。
+按窗口固定保存 28,800 个时间戳/计数槽，约 0.88 MiB，没有逐事件留存或逐笔磁盘 IO。
+
+phase 分 catchup（首次 journal Idle 之前）、tail（已见过 Idle）和 replay。
+tail 是运行阶段标识，不能保证进程永不再积压；时间本身如实包含后续积压。
+reason 分 watermark、am_timer、pm_timer、eof，收盘延迟不混入正常水位关窗统计。
+`scripts/summarize_latency.py` 按 mode/phase/reason 分组，默认排除空窗口和交易时段外
+样本，输出 mean/P50/P95/P99/P999/max 与超阈值数；支持正在追加的文件，忽略尾部
+未写完整的一行。日志既有路径拒绝覆盖，运行失败时保留已经写出的诊断前缀。

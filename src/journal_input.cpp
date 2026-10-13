@@ -53,6 +53,8 @@ struct JournalInput::Impl {
   std::filesystem::path directory;
   uint32_t day;
   bool follow;
+  bool track_read_time;
+  int64_t read_ns = 0;
   int fd = -1, page = 1, frames = 0;
   uint8_t* map = nullptr;
   size_t pos = sizeof(PageHeader), next_row = 0;
@@ -62,7 +64,8 @@ struct JournalInput::Impl {
   std::vector<DtypeRow> rows;
   std::chrono::steady_clock::time_point last_inventory{};
 
-  Impl(std::string path, uint32_t d, bool f) : directory(std::move(path)), day(d), follow(f) {
+  Impl(std::string path, uint32_t d, bool f, bool track)
+      : directory(std::move(path)), day(d), follow(f), track_read_time(track) {
     rows.reserve(32);
   }
   ~Impl() { Unmap(); }
@@ -160,6 +163,8 @@ struct JournalInput::Impl {
         continue;
       }
       FrameHeader h{}; std::memcpy(&h, map + pos, sizeof(h));
+      if (track_read_time) read_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
       cms::require(status == 1 && h.error == 0 && h.type == cms::journal_type,
                    "invalid CMS journal frame header");
       cms::require(h.length >= static_cast<int>(sizeof(h) + cms::envelope_size) &&
@@ -200,9 +205,10 @@ struct JournalInput::Impl {
     }
   }
 };
-JournalInput::JournalInput(std::string directory, uint32_t day, bool follow)
-    : impl_(std::make_unique<Impl>(std::move(directory), day, follow)) {}
+JournalInput::JournalInput(std::string directory, uint32_t day, bool follow, bool track_read_time)
+    : impl_(std::make_unique<Impl>(std::move(directory), day, follow, track_read_time)) {}
 JournalInput::~JournalInput() = default;
 JournalInput::Result JournalInput::Next(DtypeRow& row) { return impl_->Next(row); }
 const JournalStats& JournalInput::stats() const { return impl_->stats; }
+int64_t JournalInput::read_steady_ns() const { return impl_->read_ns; }
 }

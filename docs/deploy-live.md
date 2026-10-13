@@ -99,6 +99,28 @@ data/index_500ms/YYYYMMDD/current -> runs/<时间-PID>
 失败或盘中人工 stop 保留已写结果，状态标记 failed/stopped，不补造未来窗口。
 恢复时读首帧重建，需约一个历史追赶周期；没有跨进程内存快照。
 
+### 盘中延迟监控
+
+journal 入口默认在最终 Arrow 同目录生成 `latency.log`、`latency.csv` 和
+`latency.meta.json`。`latency.log` 为“交易所窗口端点 + 关窗至 Arrow flush 的
+毫秒数”，可直接 tail。你关心的最后一条行情到因子写出，在 CSV 的
+`last_recv_to_write_ms`（网关接收起算）和 `last_read_to_write_ms`（cms_rtf
+读到 committed frame 起算）里。当前只输出 exch 因子，尚无 local 因子流。
+
+```bash
+# 日期 current 在追平后指向本次 run；启动追赶期间可从 status.sh 查看 attempt。
+tail -f /data/cms/rtf/data/index_500ms/20261013/current/latency.log
+python3 /data/cms/rtf/current/scripts/summarize_latency.py \
+  /data/cms/rtf/data/index_500ms/20261013/current/latency.csv \
+  --phase tail --reason watermark
+```
+
+统计包含 mean/P50/P95/P99/P999/max，单位全部是 ms。默认排除无当前窗口行情的
+空桶；盘中正常水位关窗、收盘定时收尾、启动追赶和离线 replay 分开。历史回放中
+`last_recv_to_write_ms` 留空，不能拿历史 recv_ns 减当前时间来报告实时延迟。
+catchup 阶段的接收延迟可能包含历史数据年龄；排查时可去掉 phase 过滤查看。
+Arrow flush 表示完整 batch 已可读取，没有额外 fsync；详见 design.md 的计时边界。
+
 `crontab.example` 只提供 09:12 启动示例；部署不会自动修改 crontab 或启动业务。
 实际安装定时任务须保留网关原有条目，并按工作区规则先备份。
 

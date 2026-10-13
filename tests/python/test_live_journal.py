@@ -1,5 +1,6 @@
 """Exercise a growing, committed-frame journal without a gateway or paged."""
 import datetime
+import csv
 import json
 import os
 from pathlib import Path
@@ -231,6 +232,63 @@ class LiveJournalTest(unittest.TestCase):
         result = subprocess.run(cmd, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((out / 'factors.arrow').read_bytes(), b'accepted')
+
+    def test_latency_is_flushed_with_arrow_and_includes_waiting_for_watermark(self):
+        out = self.root / 'latency'; proc = self.start(out)
+        w = self.writer
+        w.append(2, 34199000, b'{}')
+        w.append(1, 34200200, order(1, 34200200))
+        self.wait_status(out, lambda x: x['input_rows'] == 1)
+        # The event has been read but the window cannot close yet. This delay
+        # belongs to read->write, not to close->write.
+        self.assertEqual((out / 'latency.log').read_text(), '')
+        time.sleep(.2)
+        w.append(1, 34201100, order(2, 34201100))
+        w.append(3, 34202000)
+        self.wait_status(out, lambda x: x['emitted_endpoints'] == 2)
+        with (out / 'latency.csv').open() as f: rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 2)
+        first, empty = rows
+        self.assertEqual(first['endpoint'], '09:30:00.500')
+        self.assertGreater(float(first['last_read_to_write_ms']), 190.)
+        self.assertGreater(float(first['last_read_to_write_ms']), float(first['close_to_write_ms']) + 190.)
+        self.assertEqual(first['last_recv_ns'], str(DAY0 + 34200200 * 1000000))
+        self.assertEqual(first['last_recv_to_write_ms'], '')  # historical source-clock replay
+        self.assertEqual(empty['events'], '0')
+        self.assertEqual(empty['last_read_to_write_ms'], '')
+        self.assertEqual(pa.ipc.open_stream(out / 'factors.arrow').read_all().num_rows, len(rows) * 4)
+        proc.send_signal(signal.SIGTERM); _, stderr = proc.communicate(timeout=10)
+        self.assertEqual(proc.returncode, 0, stderr)
+
+    def test_latency_on_off_preserves_factor_bits_and_logs_automatic_flushes(self):
+        self.opening()
+        self.writer.append(3, 41460000)
+        self.writer.append(3, 54060000)
+        self.writer.append(4, 55800000)
+        tables = []
+        for enabled in ('on', 'off'):
+            out = self.root / enabled
+            result = subprocess.run(self.command(out, 'replay', 8) + ['--latency', enabled],
+                                    capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            tables.append(pa.ipc.open_stream(out / 'factors.arrow').read_all())
+        check = exact_factors(*tables)
+        self.assertEqual(check['exact_columns'], 106); self.assertTrue(check['keys_equal'])
+        self.assertFalse((self.root / 'off/latency.log').exists())
+        with (self.root / 'on/latency.csv').open() as f: rows = list(csv.DictReader(f))
+        self.assertEqual(len(rows), 28800)
+        # Each Arrow automatic 1024-endpoint flush has its own completion stamp,
+        # even when one session timer closes thousands of endpoints together.
+        by_flush = {}
+        for r in rows:
+            by_flush.setdefault(r['flush_id'], []).append(r)
+            self.assertEqual(r['last_recv_to_write_ms'], '')
+            self.assertEqual(r['phase'], 'replay')
+            self.assertEqual(r['clock'], 'exch')
+        with (self.root / 'on/factors.arrow').open('rb') as f:
+            batches = list(pa.ipc.open_stream(f))
+        self.assertEqual([len(x) * 4 for x in by_flush.values()], [b.num_rows for b in batches])
+        self.assertTrue(all(len({r['write_steady_ns'] for r in group}) == 1 for group in by_flush.values()))
 
     def test_missing_intermediate_page_is_not_a_successful_end(self):
         self.opening(); self.writer.append(4, 55800000); self.writer.close_page()

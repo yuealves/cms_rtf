@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -40,6 +41,7 @@ class ArrowOutput {
  public:
   ArrowOutput(const std::string& path, int64_t day0, bool live = false);
   ~ArrowOutput();
+  void SetFlushObserver(std::function<void(const std::vector<int32_t>&)> observer);
   void Append(int32_t ep, const WindowRows& rows);
   void Flush();
   void Commit();
