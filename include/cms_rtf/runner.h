@@ -35,6 +35,16 @@ struct CaptureState {
   bool set = false;
 };
 
+class RecordSink {
+ public:
+  virtual ~RecordSink() = default;
+  virtual void Book(const BookRec& record) = 0;
+  virtual void Flow(const FlowRec& record) = 0;
+  virtual void BookRange(BookRec record, const std::vector<int32_t>& grid, int begin, int end) {
+    for (int e = begin; e < end; ++e) { record.ep_ms = grid[e]; Book(record); }
+  }
+};
+
 class SymbolRunner {
  public:
   SymbolRunner(int32_t symbol, double xl, double m, const std::vector<int32_t>& grid,
@@ -43,6 +53,10 @@ class SymbolRunner {
         book_out_(book_out), flow_out_(flow_out) {
     seed_mid_ = std::numeric_limits<double>::quiet_NaN();
   }
+
+  SymbolRunner(int32_t symbol, double xl, double m, const std::vector<int32_t>& grid,
+               RecordSink* sink)
+      : SymbolRunner(symbol, xl, m, grid, nullptr, nullptr) { sink_ = sink; }
 
   void OnEvent(const EventRec& ev) {
     // 1) 捕获封口（事件前簿）
@@ -88,6 +102,9 @@ class SymbolRunner {
   double seed_mid() const { return seed_mid_; }
   const BookHealth& health() const { return book_.health(); }
   int64_t non_monotonic() const { return flow_.non_monotonic(); }
+  size_t live_orders() const { return book_.live_orders(); }
+  size_t sh_order_identities() const { return flow_.sh_order_identities(); }
+  size_t sh_identity_capacity_bytes() const { return flow_.sh_identity_capacity_bytes(); }
 
  private:
   void CapturePending() {
@@ -115,10 +132,8 @@ class SymbolRunner {
       for (double& f : rec.feat) f = std::numeric_limits<double>::quiet_NaN();
       rec.mid = std::numeric_limits<double>::quiet_NaN();
     }
-    for (int e = grid_pos_; e < pos; ++e) {
-      rec.ep_ms = grid_[e];
-      book_out_->push_back(rec);
-    }
+    if (sink_) sink_->BookRange(rec, grid_, grid_pos_, pos);
+    else for (int e = grid_pos_; e < pos; ++e) { rec.ep_ms = grid_[e]; book_out_->push_back(rec); }
   }
 
   void EmitFlow(int32_t ep, const double* bases) {
@@ -126,7 +141,7 @@ class SymbolRunner {
     rec.symbol = symbol_;
     rec.ep_ms = ep;
     std::memcpy(rec.bases, bases, sizeof(rec.bases));
-    flow_out_->push_back(rec);
+    if (sink_) sink_->Flow(rec); else flow_out_->push_back(rec);
   }
 
   int32_t symbol_;
@@ -135,6 +150,7 @@ class SymbolRunner {
   const std::vector<int32_t>& grid_;
   std::vector<BookRec>* book_out_;
   std::vector<FlowRec>* flow_out_;
+  RecordSink* sink_ = nullptr;
   int grid_pos_ = -1;
   CaptureState cap_{};
   bool capture_pending_ = false;

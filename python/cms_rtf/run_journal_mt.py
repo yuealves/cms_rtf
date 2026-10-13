@@ -73,11 +73,16 @@ def main():
     p.add_argument('--out', required=True)
     p.add_argument('--aggregate-backend', choices=['cpp', 'python'], default='cpp')
     p.add_argument('--aggregator', help='native aggregation executable override')
+    p.add_argument('--output-mode', choices=['blocks', 'legacy'],
+                   help='default: bounded blocks for C++, legacy for Python aggregation')
     p.add_argument('--kernel', default=str(Path(__file__).resolve().parents[2]
                                            / 'build/cms_index500ms_mt'))
     args = p.parse_args()
     if not 1 <= args.workers <= 64 or args.export_threads < 1:
         p.error('workers must be 1..64 and export-threads must be positive')
+    output_mode = args.output_mode or ('blocks' if args.aggregate_backend == 'cpp' else 'legacy')
+    if args.aggregate_backend == 'python' and output_mode == 'blocks':
+        p.error('Python aggregation requires --output-mode legacy')
 
     out_dir = Path(args.out) / 'index_500ms' / args.day
     inter = out_dir / 'intermediate'
@@ -102,13 +107,13 @@ def main():
     for i, s in enumerate(ref['symbols']):
         thresh[i] = (s, ref['dyn'][int(s)][1], ref['dyn'][int(s)][2])
     thresh.tofile(inter / 'thresh.bin')
-    for old in inter.glob('w*.*.bin'):
+    for old in list(inter.glob('w*.*.bin')) + list(inter.glob('w*.*.cmsb')):
         old.unlink()
     export_cmd = [args.exporter, '--input', args.journal, '--day', args.day,
                   '--summary', str(inter / 'export.summary.json'),
                   '--threads', str(args.export_threads)]
     kernel_cmd = [args.kernel, '--thresh', str(inter / 'thresh.bin'),
-                  '--work-dir', str(inter), '--workers', str(args.workers)]
+                  '--work-dir', str(inter), '--workers', str(args.workers), '--output-mode', output_mode]
     health, stages = run_pipeline(export_cmd, kernel_cmd, inter, env, args.keep_stream)
     timings.update({k: round(v, 3) for k, v in stages.items()})
     (inter / 'kernel.summary.json').write_text(json.dumps(health, indent=2) + '\n')
@@ -116,9 +121,7 @@ def main():
 
     # 3) 聚合（按 symbol 升序 → 与 worker 数位级一致）
     t = time.time()
-    books = sorted(inter.glob('w*.book.bin'))
-    flows = sorted(inter.glob('w*.flow.bin'))
-    seeds = sorted(inter.glob('w*.seeds.bin'))
+    books, flows, seeds = native_aggregate.worker_paths(inter)
     arrow_path = out_dir / 'index_500ms_exch.arrow'
     rows = native_aggregate.run_backend(args.aggregate_backend, books, flows, seeds,
                                         ref, args.day, arrow_path, args.aggregator)

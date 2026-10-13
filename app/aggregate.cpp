@@ -25,6 +25,7 @@
 
 #include "cms_rtf/catalog.h"
 #include "cms_rtf/events.h"
+#include "cms_rtf/record_blocks.h"
 
 namespace {
 using namespace cms_rtf;
@@ -118,23 +119,42 @@ template<class T> class Reader {
   int32_t previous_ = -1;
 };
 
-template<class T, class Fn> uint64_t ForSymbols(const std::vector<std::string>& paths, Fn fn) {
-  std::vector<std::unique_ptr<Reader<T>>> readers;
-  for (const auto& path : paths) readers.push_back(std::make_unique<Reader<T>>(path));
+struct InputPath { std::string path; bool blocks = false; };
+template<class T> class SymbolReader {
+ public:
+  explicit SymbolReader(const InputPath& input) {
+    if (input.blocks) blocks_ = std::make_unique<BlockReader<T>>(input.path);
+    else legacy_ = std::make_unique<Reader<T>>(input.path);
+  }
+  bool Has() const { return blocks_ ? blocks_->Has() : legacy_->Has(); }
+  int32_t symbol() const { return blocks_ ? blocks_->symbol() : legacy_->Current().symbol; }
+  void ReadSymbol(std::vector<T>& records) {
+    if (blocks_) { blocks_->ReadSymbol(records); return; }
+    records.clear();
+    const auto sym = symbol();
+    do {
+      records.push_back(legacy_->Current());
+      legacy_->Advance();
+    } while (Has() && symbol() == sym);
+  }
+ private:
+  std::unique_ptr<Reader<T>> legacy_;
+  std::unique_ptr<BlockReader<T>> blocks_;
+};
+
+template<class T, class Fn> uint64_t ForSymbols(const std::vector<InputPath>& paths, Fn fn) {
+  std::vector<std::unique_ptr<SymbolReader<T>>> readers;
+  for (const auto& path : paths) readers.push_back(std::make_unique<SymbolReader<T>>(path));
   std::vector<T> records;
   uint64_t count = 0;
   while (true) {
-    Reader<T>* next = nullptr;
+    SymbolReader<T>* next = nullptr;
     // Stable ties preserve the Python concatenation/file order for repeated groups.
     for (auto& r : readers)
-      if (r->Has() && (!next || r->Current().symbol < next->Current().symbol)) next = r.get();
+      if (r->Has() && (!next || r->symbol() < next->symbol())) next = r.get();
     if (!next) break;
-    const int32_t symbol = next->Current().symbol;
-    records.clear();
-    do {
-      records.push_back(next->Current());
-      next->Advance();
-    } while (next->Has() && next->Current().symbol == symbol);
+    const int32_t symbol = next->symbol();
+    next->ReadSymbol(records);
     count += records.size();
     fn(symbol, records);
   }
@@ -333,15 +353,18 @@ void WriteArrow(const std::string& path, int64_t day0, const std::vector<int32_t
 
 int Run(int argc, char** argv) {
   std::string reference, day, output;
-  std::vector<std::string> books, flows, seed_paths;
+  std::vector<InputPath> books, flows;
+  std::vector<std::string> seed_paths;
   if (argc % 2 != 1) throw std::runtime_error("each option requires a value");
   for (int i = 1; i < argc; i += 2) {
     const std::string key = argv[i], value = argv[i + 1];
     if (key == "--ref") reference = value;
     else if (key == "--day") day = value;
     else if (key == "--out") output = value;
-    else if (key == "--book") books.push_back(value);
-    else if (key == "--flow") flows.push_back(value);
+    else if (key == "--book") books.push_back({value, false});
+    else if (key == "--flow") flows.push_back({value, false});
+    else if (key == "--book-blocks") books.push_back({value, true});
+    else if (key == "--flow-blocks") flows.push_back({value, true});
     else if (key == "--seed") seed_paths.push_back(value);
     else throw std::runtime_error("unknown argument: " + key);
   }

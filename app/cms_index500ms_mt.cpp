@@ -4,16 +4,17 @@
 //   → N 个 worker 线程（各自 symbol 子集的每股状态机）→ per-worker 记录文件
 //
 // 线程模型照华泰 light_rtf（dispatcher/SymbolWorker/固定顺序聚合）；
-// 聚合在 Python 侧按 symbol 升序汇总 ⇒ 输出与 worker 数无关（位级一致）。
+// 聚合在 C++ 侧按 symbol 升序汇总 ⇒ 输出与 worker 数无关（位级一致）。
 //
 // 输入：cms_journal_export 的 128B DTYPE 行流（文件；头部 CMSPQ01\0 自动跳过）。
-// 输出：work_dir/w{i}/{book,flow,seeds}.bin + 健康汇总 JSON（stdout）。
+// 输出：work_dir/w{i}.{book,flow}.cmsb + w{i}.seeds.bin；legacy 模式输出 .bin。
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
 #include <atomic>
 #include <cinttypes>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -23,10 +24,13 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <sys/resource.h>
+#include <unistd.h>
 
 #include "cms_rtf/engine.h"
 #include "cms_rtf/events.h"
 #include "cms_rtf/runner.h"
+#include "cms_rtf/record_blocks.h"
 
 namespace {
 
@@ -107,9 +111,37 @@ EventRec map_row(const DtypeRow& r, int32_t symbol) {
   return ev;
 }
 
-struct SymbolBuffers {           // 每股独立的输出缓冲（保证落盘按 symbol 连续）
+struct SymbolBuffers : RecordSink {
   std::vector<BookRec> book;
   std::vector<FlowRec> flow;
+  BlockWriter<BookRec>* books = nullptr;
+  BlockWriter<FlowRec>* flows = nullptr;
+
+  void BookRange(BookRec record, const std::vector<int32_t>& grid, int begin, int end) override {
+    if (books) {
+      // Aggregate already carries the latest record forward to each endpoint.
+      // A quiet span needs one capture, not repeated 280-byte copies. Keep act_ms
+      // and midpoint unchanged: age and the return chain are evaluated on grid.
+      if (begin < end) { record.ep_ms = grid[begin]; Book(record); }
+    } else {
+      RecordSink::BookRange(record, grid, begin, end);
+    }
+  }
+
+  void Book(const BookRec& record) override {
+    if (books && book.capacity() == 0) book.reserve(kOutputBlockRecords);
+    book.push_back(record);
+    if (books && book.size() == kOutputBlockRecords) { books->Append(book.data(), book.size()); book.clear(); }
+  }
+  void Flow(const FlowRec& record) override {
+    if (flows && flow.capacity() == 0) flow.reserve(kOutputBlockRecords);
+    flow.push_back(record);
+    if (flows && flow.size() == kOutputBlockRecords) { flows->Append(flow.data(), flow.size()); flow.clear(); }
+  }
+  void Flush() {
+    if (books) { books->Append(book.data(), book.size()); book.clear(); }
+    if (flows) { flows->Append(flow.data(), flow.size()); flow.clear(); }
+  }
 };
 
 struct WorkerCtx {
@@ -121,12 +153,14 @@ struct WorkerCtx {
   BookHealth health;
   int64_t nonmono = 0;
   int64_t events = 0;
+  uint64_t output_capacity_at_eof = 0, sh_identities = 0, identity_capacity = 0, live_orders = 0;
 };
 
 }  // namespace
 
 int main(int argc, char** argv) {
   std::string input_path, thresh_path, work_dir;
+  std::string output_mode = "blocks";
   int workers = 8;
   for (int i = 1; i + 1 < argc; i += 2) {
     const std::string k = argv[i], v = argv[i + 1];
@@ -134,11 +168,12 @@ int main(int argc, char** argv) {
     else if (k == "--thresh") thresh_path = v;
     else if (k == "--work-dir") work_dir = v;
     else if (k == "--workers") workers = std::stoi(v);
+    else if (k == "--output-mode") output_mode = v;
     else { std::cerr << "unknown arg " << k << "\n"; return 2; }
   }
   if (input_path.empty() || thresh_path.empty() || work_dir.empty() ||
-      workers < 1 || workers > 64) {
-    std::cerr << "usage: --input F --thresh T --work-dir D [--workers N]\n";
+      workers < 1 || workers > 64 || (output_mode != "blocks" && output_mode != "legacy")) {
+    std::cerr << "usage: --input F --thresh T --work-dir D [--workers N] [--output-mode blocks|legacy]\n";
     return 2;
   }
 
@@ -163,6 +198,10 @@ int main(int argc, char** argv) {
   }
   FILE* in = input_path == "-" ? stdin : std::fopen(input_path.c_str(), "rb");
   if (!in) { std::cerr << "cannot open " << input_path << "\n"; return 1; }
+  // Avoid stdio reading ahead into records while parsing the header. The event
+  // loop uses read(2), which returns available pipe bytes without waiting for an
+  // entire 8 MiB batch (important for a continuously running journal producer).
+  std::setvbuf(in, nullptr, _IONBF, 0);
   std::array<char, 8> prefix{};
   const size_t prefix_size = std::fread(prefix.data(), 1, prefix.size(), in);
   const bool has_magic = prefix_size == 8 && std::memcmp(prefix.data(), "CMSPQ01\0", 8) == 0;
@@ -189,14 +228,19 @@ int main(int argc, char** argv) {
     ctx->thread = std::thread([&, i, ctx = ctx.get()]() {
       try {
       std::array<EventRec, kBatchSize> batch;
+      const std::string prefix = work_dir + "/w" + std::to_string(i);
+      std::unique_ptr<BlockWriter<BookRec>> books;
+      std::unique_ptr<BlockWriter<FlowRec>> flows;
+      if (output_mode == "blocks") {
+        books = std::make_unique<BlockWriter<BookRec>>(prefix + ".book.cmsb");
+        flows = std::make_unique<BlockWriter<FlowRec>>(prefix + ".flow.cmsb");
+      }
       auto finish_all = [&]() {
-        // 按 symbol 升序连续落盘：聚合层的读法依赖组内连续
-        std::ofstream book_out(work_dir + "/w" + std::to_string(i) + ".book.bin",
-                               std::ios::binary);
-        std::ofstream flow_out(work_dir + "/w" + std::to_string(i) + ".flow.bin",
-                               std::ios::binary);
-        std::ofstream seeds_out(work_dir + "/w" + std::to_string(i) + ".seeds.bin",
-                                std::ios::binary);
+        // Legacy output remains available for byte-for-byte acceptance. Block
+        // output has already been written during OnEvent; only tails/index remain.
+        std::ofstream book_out, flow_out;
+        if (!books) { book_out.open(prefix + ".book.bin", std::ios::binary); flow_out.open(prefix + ".flow.bin", std::ios::binary); }
+        std::ofstream seeds_out(prefix + ".seeds.bin", std::ios::binary);
         book_out.exceptions(std::ios::failbit | std::ios::badbit);
         flow_out.exceptions(std::ios::failbit | std::ios::badbit);
         seeds_out.exceptions(std::ios::failbit | std::ios::badbit);
@@ -208,6 +252,11 @@ int main(int argc, char** argv) {
         std::sort(syms.begin(), syms.end());
         for (int32_t sym : syms) {
           SymbolRunner* runner = ctx->states[sym];
+          auto& buf = ctx->bufs[sym];
+          ctx->output_capacity_at_eof += buf.book.capacity() * sizeof(BookRec) + buf.flow.capacity() * sizeof(FlowRec);
+          ctx->sh_identities += runner->sh_order_identities();
+          ctx->identity_capacity += runner->sh_identity_capacity_bytes();
+          ctx->live_orders += runner->live_orders();
           runner->Finish();
           seeds_out.write(reinterpret_cast<const char*>(&sym), sizeof(sym));
           const double sm = runner->seed_mid();
@@ -220,15 +269,19 @@ int main(int argc, char** argv) {
           ctx->health.crossed_book += runner->health().crossed_book;
           ctx->health.immediate_fill += runner->health().immediate_fill;
           ctx->nonmono += runner->non_monotonic();
-          auto& buf = ctx->bufs[sym];
+          if (books) { buf.Flush(); }
+          else {
           book_out.write(reinterpret_cast<const char*>(buf.book.data()),
                          static_cast<std::streamsize>(buf.book.size() * sizeof(BookRec)));
           flow_out.write(reinterpret_cast<const char*>(buf.flow.data()),
                          static_cast<std::streamsize>(buf.flow.size() * sizeof(FlowRec)));
+          }
           delete runner;
           ctx->bufs.erase(sym);
         }
-        book_out.close(); flow_out.close(); seeds_out.close();
+        if (books) { books->Close(); flows->Close(); }
+        else { book_out.close(); flow_out.close(); }
+        seeds_out.close();
         ctx->states.clear();
         ctx->bufs.clear();
       };
@@ -247,12 +300,13 @@ int main(int argc, char** argv) {
           if (it == ctx->states.end()) {
             const auto th = thresh.find(ev.symbol);
             auto& buf = ctx->bufs[ev.symbol];
+            buf.books = books.get(); buf.flows = flows.get();
             it = ctx->states
                      .emplace(ev.symbol,
                               new SymbolRunner(ev.symbol,
                                                th != thresh.end() ? th->second.xl : 0.0,
                                                th != thresh.end() ? th->second.m : 0.0,
-                                               grid, &buf.book, &buf.flow))
+                                               grid, &buf))
                      .first;
           }
           it->second->OnEvent(ev);
@@ -287,8 +341,13 @@ int main(int argc, char** argv) {
   if (carry) std::memcpy(rows.data(), prefix.data(), carry);
   bool input_error = false;
   while (!worker_failed.load(std::memory_order_relaxed)) {
-    const size_t bytes = std::fread(reinterpret_cast<char*>(rows.data()) + carry, 1,
-                                   rows.size() * sizeof(DtypeRow) - carry, in);
+    ssize_t received;
+    do {
+      received = ::read(fileno(in), reinterpret_cast<char*>(rows.data()) + carry,
+                        rows.size() * sizeof(DtypeRow) - carry);
+    } while (received < 0 && errno == EINTR);
+    if (received < 0) { input_error = true; break; }
+    const size_t bytes = static_cast<size_t>(received);
     const size_t total = bytes + carry;
     const size_t got = total / sizeof(DtypeRow);
     input_rows += got;
@@ -313,6 +372,7 @@ int main(int argc, char** argv) {
 
   BookHealth total;
   int64_t nonmono = 0;
+  uint64_t output_capacity = 0, sh_identities = 0, identity_capacity = 0, live_orders = 0;
   for (auto& ctx : ctxs) {
     ctx->thread.join();
     total.over_deduct += ctx->health.over_deduct;
@@ -323,6 +383,10 @@ int main(int argc, char** argv) {
     total.crossed_book += ctx->health.crossed_book;
     total.immediate_fill += ctx->health.immediate_fill;
     nonmono += ctx->nonmono;
+    output_capacity += ctx->output_capacity_at_eof;
+    sh_identities += ctx->sh_identities;
+    identity_capacity += ctx->identity_capacity;
+    live_orders += ctx->live_orders;
   }
   if (worker_failed.load()) {
     for (auto& ctx : ctxs) if (ctx->error) {
@@ -335,12 +399,18 @@ int main(int argc, char** argv) {
   const auto finished = std::chrono::steady_clock::now();
   const double dispatch_s = std::chrono::duration<double>(dispatched - started).count();
   const double total_s = std::chrono::duration<double>(finished - started).count();
-  std::printf("{\"input_rows\": %" PRId64 ", \"dispatch_seconds\": %.6f, "
+  struct rusage usage{};
+  getrusage(RUSAGE_SELF, &usage);
+  std::printf("{\"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
+              "\"output_capacity_at_eof_bytes\": %" PRIu64 ", \"sh_identities_at_eof\": %" PRIu64 ", "
+              "\"sh_identity_capacity_at_eof_bytes\": %" PRIu64 ", \"live_orders_at_eof\": %" PRIu64 ", "
+              "\"input_rows\": %" PRId64 ", \"dispatch_seconds\": %.6f, "
               "\"total_seconds\": %.6f, \"events\": %" PRId64 ", \"workers\": %d, \"spin_waits\": %" PRId64
               ", \"over_deduct\": %" PRId64 ", \"d_unknown\": %" PRId64
               ", \"unknown_trade_ref\": %" PRId64 ", \"late_passive_ref\": %" PRId64
               ", \"agg_skip\": %" PRId64 ", \"crossed_book\": %" PRId64
               ", \"immediate_fill\": %" PRId64 ", \"sz_non_monotonic\": %" PRId64 "}\n",
+              output_mode.c_str(), usage.ru_maxrss, output_capacity, sh_identities, identity_capacity, live_orders,
               input_rows, dispatch_s, total_s, n_events, workers, spin_waits, total.over_deduct, total.d_unknown,
               total.unknown_trade_ref, total.late_passive_ref, total.agg_skip,
               total.crossed_book, total.immediate_fill, nonmono);

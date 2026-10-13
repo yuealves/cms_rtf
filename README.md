@@ -30,6 +30,11 @@ python/cms_rtf/run_day.py    日级驱动；--compare 生成对拍报告
 C++ 与 Python 之间用二进制文件接口（`events.bin`/`book.bin`/`flow.bin`/`seeds.bin`，
 布局与 `include/cms_rtf/events.h` 的结构体逐字节一致、有 static_assert 守护）。
 
+多线程 journal 驱动 `cms_rtf.run_journal_mt` 默认将内核结果分块写入
+`w*.book.cmsb` / `w*.flow.cmsb`，避免在内存中留存全天结果；C++ 聚合读取版本化索引。
+`--aggregate-backend python` 自动使用旧稠密 `.bin` 格式，内核也可显式指定
+`--output-mode legacy` 对照。格式与实盘接入边界见 [设计说明](docs/design.md)。
+
 ## 构建与测试
 
 聚合默认使用 C++。构建需要 Arrow C++，也可直接使用现有 PyArrow 安装内的头文件和

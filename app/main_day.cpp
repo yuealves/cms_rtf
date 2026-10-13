@@ -53,11 +53,16 @@ int main(int argc, char** argv) {
   EventRec ev;
   std::vector<BookRec> book_buf;
   std::vector<FlowRec> flow_buf;
-  book_buf.reserve(1 << 20);
-  flow_buf.reserve(1 << 20);
+  book_buf.reserve(kNumEndpoints);
+  flow_buf.reserve(1024);
   SymbolRunner* runner = nullptr;
   int32_t cur_symbol = -1;
   std::ofstream seeds_out(seeds_path, std::ios::binary);
+  std::ofstream book_out(book_path, std::ios::binary);
+  std::ofstream flow_out(flow_path, std::ios::binary);
+  seeds_out.exceptions(std::ios::failbit | std::ios::badbit);
+  book_out.exceptions(std::ios::failbit | std::ios::badbit);
+  flow_out.exceptions(std::ios::failbit | std::ios::badbit);
   auto finish_symbol = [&]() {
     runner->Finish();
     seeds_out.write(reinterpret_cast<const char*>(&cur_symbol), sizeof(cur_symbol));
@@ -71,6 +76,11 @@ int main(int argc, char** argv) {
     total_health.crossed_book += runner->health().crossed_book;
     total_health.immediate_fill += runner->health().immediate_fill;
     total_nonmono += runner->non_monotonic();
+    book_out.write(reinterpret_cast<const char*>(book_buf.data()),
+                   static_cast<std::streamsize>(book_buf.size() * sizeof(BookRec)));
+    flow_out.write(reinterpret_cast<const char*>(flow_buf.data()),
+                   static_cast<std::streamsize>(flow_buf.size() * sizeof(FlowRec)));
+    book_buf.clear(); flow_buf.clear();
     delete runner;
     ++n_symbols;
   };
@@ -92,14 +102,7 @@ int main(int argc, char** argv) {
   if (runner != nullptr) {
     finish_symbol();
   }
-  {
-    std::ofstream book_out(book_path, std::ios::binary);
-    book_out.write(reinterpret_cast<const char*>(book_buf.data()),
-                   static_cast<std::streamsize>(book_buf.size() * sizeof(BookRec)));
-    std::ofstream flow_out(flow_path, std::ios::binary);
-    flow_out.write(reinterpret_cast<const char*>(flow_buf.data()),
-                   static_cast<std::streamsize>(flow_buf.size() * sizeof(FlowRec)));
-  }
+  book_out.close(); flow_out.close(); seeds_out.close();
 
   std::printf("{\"events\": %" PRId64 ", \"symbols\": %" PRId64
               ", \"over_deduct\": %" PRId64 ", \"d_unknown\": %" PRId64

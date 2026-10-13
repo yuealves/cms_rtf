@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
+#include "cms_rtf/identity_table.h"
 
 #include "cms_rtf/events.h"
 
@@ -99,12 +100,14 @@ class SymbolFlow {
   }
 
   int64_t non_monotonic() const { return non_monotonic_; }
+  size_t sh_order_identities() const { return sh_orders_.size(); }
+  size_t sh_identity_capacity_bytes() const { return sh_orders_.capacity_bytes(); }
 
  private:
   double thresh_xl_, thresh_m_;
   FlowBases cur_{};
   int32_t cur_ep_ = -1;
-  std::unordered_map<int64_t, ShOrderTrack> sh_orders_;
+  IdentityTable<ShOrderTrack> sh_orders_;
   std::unordered_map<int64_t, ShFrag> sh_bucket_;
   std::unordered_map<int32_t, SzPriceBook> sz_prices_;
   int64_t non_monotonic_ = 0;

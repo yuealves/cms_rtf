@@ -37,8 +37,25 @@ def command(books, flows, seeds, reference, day, output, binary=None):
     for option, paths in [('--book', books), ('--flow', flows), ('--seed', seeds)]:
         paths = [paths] if isinstance(paths, (str, Path)) else paths
         for path in paths:
-            args += [option, str(path)]
+            flag = option + '-blocks' if option != '--seed' and Path(path).suffix == '.cmsb' else option
+            args += [flag, str(path)]
     return args
+
+
+def worker_paths(directory):
+    """Reject mixed/stale output formats instead of accidentally double counting."""
+    directory = Path(directory)
+    result = []
+    for kind in ('book', 'flow', 'seeds'):
+        legacy = sorted(directory.glob(f'w*.{kind}.bin'))
+        blocks = sorted(directory.glob(f'w*.{kind}.cmsb'))
+        if legacy and blocks:
+            raise ValueError(f'mixed legacy/block {kind} files in {directory}; use a fresh output directory')
+        paths = blocks or legacy
+        if not paths:
+            raise ValueError(f'missing {kind} worker files in {directory}')
+        result.append(paths)
+    return result
 
 
 def run(books, flows, seeds, ref, day, output, binary=None):
@@ -57,6 +74,9 @@ def run_backend(backend, books, flows, seeds, ref, day, output, binary=None):
         return run(books, flows, seeds, ref, day, output, binary)
     if backend != 'python':
         raise ValueError(f'unknown aggregation backend: {backend}')
+    if any(Path(p).suffix == '.cmsb' for paths in (books, flows)
+           for p in ([paths] if isinstance(paths, (str, Path)) else paths)):
+        raise ValueError('Python aggregation requires --output-mode legacy; CMSBLK01 needs the C++ reader')
     from . import aggregate
     grid, rows = aggregate.aggregate(books, flows, seeds, ref, day)
     return aggregate.write_arrow(grid, rows, day, output)

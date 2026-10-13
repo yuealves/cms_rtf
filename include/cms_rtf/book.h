@@ -47,6 +47,7 @@ class SymbolBook {
   Snapshot Capture() const;
 
   const BookHealth& health() const { return health_; }
+  size_t live_orders() const { return orders_.size(); }
 
  private:
   struct OrderState {

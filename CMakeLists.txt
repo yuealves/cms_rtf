@@ -52,6 +52,10 @@ add_executable(test_ring tests/cpp/test_ring.cpp)
 target_link_libraries(test_ring PRIVATE cms_rtf_core)
 add_test(NAME ring COMMAND test_ring)
 
+add_executable(test_identity_table tests/cpp/test_identity_table.cpp)
+target_include_directories(test_identity_table PRIVATE include)
+add_test(NAME identity_table COMMAND test_identity_table)
+
 # Release builds must still execute the assertions in the original unit tests.
 target_compile_options(test_book PRIVATE -UNDEBUG)
 target_compile_options(test_flow PRIVATE -UNDEBUG)

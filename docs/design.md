@@ -116,3 +116,46 @@ Arrow 采用 1,024 端点/批的 IPC stream，列类型、行序、无时区北�
 批边界不属于数据契约。写入同目录临时文件，正常关闭后替换目标，失败保留旧输出。
 逐笔内核仍然缓存全天逐股端点结果到 EOF；此次原生聚合没有改成实时水位关窗。
 所以聚合阶段内存下降不代表全天逐笔内核的约 22.9 GiB 峰值已消除。
+
+## 内核内存优化（2026-10-13，后续版本）
+
+用户计划的实盘链路是 CMS gateway → Kungfu journal → cms_rtf。上节的
+22.9 GiB 是单独 `cms_index500ms_mt` 读已导出的 DTYPE 文件时的进程 RSS，
+不含 replay exporter；但旧内核把全天逐股 BookRec/FlowRec 保留在 vector 中，
+这属于离线结果留存，不能当成实盘状态的必要内存。本节优化共享计算状态与
+结果留存；当前入口仍在 EOF 后聚合 Arrow，不引入 journal 实时订阅、水位或实时发布。
+
+多线程内核默认 `--output-mode blocks`，每股盘口/流量分别最多缓存 512 条，
+满块立即交给每 worker 的 1 MiB 文件缓冲，EOF 只补尾块与索引。
+`SymbolRunner` 通过 RecordSink 输出，内核不再持有全天结果。
+无事件的连续网格保留一个盘口捕获，聚合的 last-record carry-forward 恢复每个端点；
+act_ms、mid 和特征原样保留，年龄、收益链、午休与 106 列口径不变。
+小块索引仍随记录数增长；它不属于严格常量内存，不声称整个引擎内存有固定上界。
+单线程按股分组入口在一股完成后落盘并复用缓冲，不再累积所有股票输出。
+
+新中间容器是 **CMSBLK01**（`.book.cmsb` / `.flow.cmsb`）：
+
+- 16B header：magic[8]、u32 record_size、u32 index_entry_size (=16)。
+- payload：原 BookRec280 / FlowRec176 字节布局，每块同一 symbol、1–512 条。
+- EOF 索引：逐块 int32 symbol、u32 count、u64 offset；保留写出顺序。
+- 32B footer：CMSIDX01[8]、u64 index_offset、u64 index_count、u64 record_count。
+
+字段沿用现有 x86 小端布局。索引按 symbol 稳定合并，每次读取一股，保持求和顺序。
+读取器检查版本、长度、块范围、记录 symbol 与端点顺序；无完整 footer 的文件拒绝聚合。
+旧原始 `.bin` ABI 和 Seed12 不变；`--output-mode legacy` 保留稠密旧输出与 Python 对照。
+新文件必须通过显式 `--book-blocks` / `--flow-blocks` 参数读取，旧 C++ reader 拒绝参数，
+Python driver 拒绝块格式和混合新旧输出目录，避免默默误读。
+
+SH 全天身份表保留全部成交/委托的身份信息，未删除“已成交”或“久未出现”的身份。
+将每条单独分配的 unordered_map 节点改为 256 条一页的稳定记录和开放寻址 uint32 索引，
+减少指针、分配器和散列节点开销。桶内迭代与浮点累加顺序没有改变。
+活跃委托簿仍保留原语义；这一部分以及 SH 全天身份数都会随当日行情变化。
+
+输入循环用 read(2) 接收管道当前可读字节并保留不完整记录，避免 fread 等待填满
+8 MiB 或 EOF。该改动不等同于实现生产水位与低延迟发布。
+
+`scripts/benchmark_memory.py` 独立计时 kernel / C++ aggregate，以 `/usr/bin/time -v`
+测各进程峰值，另采样 `/proc/PID/status` 的 RssAnon/RssFile。运行时无 exporter。
+JSON 中 output/identity capacity 是各股 EOF 前容量求和，不是 RSS 峰值时刻堆剖析；
+allocator、ring、活跃簿等仍包含在进程 RSS 中。稀疏 BookRec 按网格展开后与旧版逐字节
+SHA256 对照，FlowRec/Seed12 直接对照，再检查全部 106 列、null mask、键与健康计数。

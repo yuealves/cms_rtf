@@ -18,6 +18,7 @@ import pyarrow as pa
 
 from cms_rtf import aggregate, native_aggregate, refdata
 from cms_rtf.validate_replay import exact_factors
+from cms_rtf.record_blocks import logical_digest
 
 
 def digest(path):
@@ -74,6 +75,8 @@ def main():
         dest.mkdir()
         cmd = [str(repo / 'build/cms_index500ms_mt'), '--input', args.input,
                '--thresh', str(thresh), '--work-dir', str(dest), '--workers', str(workers)]
+        if name != 'baseline':
+            cmd += ['--output-mode', 'blocks' if args.aggregate_backend == 'cpp' else 'legacy']
         t = time.monotonic()
         with open(dest / 'kernel.json', 'w') as stdout, open(dest / 'kernel.stderr', 'w') as stderr:
             subprocess.run(['/usr/bin/time', '-v', '-o', str(dest / 'time.txt')] + cmd,
@@ -82,7 +85,7 @@ def main():
         health = json.loads((dest / 'kernel.json').read_text())
         print(json.dumps(dict(stage='kernel', run=name, seconds=kernel_s, health=health)), flush=True)
         t = time.monotonic()
-        books, flows, seeds = [sorted(dest.glob(f'w*.{kind}.bin')) for kind in ('book', 'flow', 'seeds')]
+        books, flows, seeds = native_aggregate.worker_paths(dest)
         if name != 'baseline' and args.aggregate_backend == 'cpp':
             native_aggregate.run(books, flows, seeds, ref, args.day, dest / 'factors.arrow', args.aggregator)
         else:
@@ -96,12 +99,23 @@ def main():
             report['checks'][name] = check
         (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
         print(json.dumps(dict(stage='aggregate', run=name, seconds=agg_s)), flush=True)
-    ignored = {'workers', 'spin_waits', 'input_rows', 'dispatch_seconds', 'total_seconds'}
+    ignored = {'workers', 'spin_waits', 'input_rows', 'dispatch_seconds', 'total_seconds',
+               'output_mode', 'peak_rss_kib', 'output_capacity_at_eof_bytes', 'sh_identities_at_eof',
+               'sh_identity_capacity_at_eof_bytes', 'live_orders_at_eof'}
     old_health = report['runs']['baseline']['health']
     report['health_equal'] = all(all(r['health'].get(k) == v for k, v in old_health.items()
                                 if k not in ignored) for r in report['runs'].values())
-    report['binary_equal'] = {path.name: digest(path) == digest(out / 'optimized' / path.name)
-                             for path in sorted((out / 'baseline').glob('w*.bin'))}
+    report['binary_equal'] = {}
+    for path in sorted((out / 'baseline').glob('w*.bin')):
+        optimized = out / 'optimized' / path.name
+        if '.book.' in path.name or '.flow.' in path.name:
+            size = 280 if '.book.' in path.name else 176
+            if not optimized.exists():
+                optimized = optimized.with_suffix('.cmsb')
+            equal = logical_digest(path, size) == logical_digest(optimized, size, expand_books=size == 280)
+        else:
+            equal = digest(path) == digest(optimized)
+        report['binary_equal'][path.name] = equal
     if args.reference:
         report['checks']['accepted_reference'] = exact_factors(load(args.reference),
                                                               load(out / 'optimized/factors.arrow'))

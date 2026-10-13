@@ -41,7 +41,7 @@ class PipelineTest(unittest.TestCase):
     def command(self, out, workers=1):
         out.mkdir()
         return [str(self.kernel), '--thresh', str(self.root / 'thresh'),
-                '--work-dir', str(out), '--workers', str(workers)]
+                '--work-dir', str(out), '--workers', str(workers), '--output-mode', 'legacy']
 
     def test_pipe_file_headerless_and_worker_equivalence(self):
         outputs = []
