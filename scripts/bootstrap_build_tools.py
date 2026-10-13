@@ -20,7 +20,7 @@ PACKAGES = ['gcc-13-x86-64-linux-gnu', 'g++-13-x86-64-linux-gnu', 'cpp-13-x86-64
             'binutils-x86-64-linux-gnu', 'binutils-common', 'libbinutils',
             'cmake', 'cmake-data', 'make', 'libmpc3', 'libisl23', 'libcc1-0',
             'libgomp1', 'libjsoncpp25', 'librhash0', 'libuv1t64', 'libarchive13t64',
-            'libstdc++6', 'libgcc-s1']
+            'libstdc++6', 'libgcc-s1', 'libsframe1', 'libctf0', 'libctf-nobfd0']
 
 
 def main():

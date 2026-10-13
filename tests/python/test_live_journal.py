@@ -196,6 +196,10 @@ class LiveJournalTest(unittest.TestCase):
         # Frozen-journal replay uses recorded clocks, independent of replay speed
         # or file chunk boundaries, and must match the growing journal result.
         expected = pa.ipc.open_stream(out / 'factors.arrow').read_all()
+        # Two on-time 100-share orders, weight .5 for each of four indices.
+        # Neither the huge late order nor the newly seen stock's late order may
+        # leak into the next bucket's flow.
+        self.assertEqual(np.nansum(expected['order_buy_volume_500ms'].to_numpy()), 400.)
         for workers in (1, 8):
             replay = self.root / f'replay{workers}'
             result = subprocess.run(self.command(replay, 'replay', workers), capture_output=True, timeout=20)
