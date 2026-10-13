@@ -104,7 +104,7 @@ def build_release(prefix, source, jobs, python_root):
     env['PYTHONPATH'] = str(source / 'python') + ':' + str(python_root)
     env['PYTHONDONTWRITEBYTECODE'] = '1'
     if kit.exists():
-        env['PATH'] = str(kit) + ':' + env['PATH']
+        env['PATH'] = str(kit) + ':' + str(kit.parent / 'sysroot/usr/bin') + ':' + env['PATH']
     commit = git(source, 'rev-parse', 'HEAD')
     log = prefix / 'log' / f'build-{commit}.log'; log.parent.mkdir(exist_ok=True)
     started = time.monotonic()
@@ -119,7 +119,10 @@ def build_release(prefix, source, jobs, python_root):
                '-DPython3_EXECUTABLE=/usr/bin/python3', '-DCMAKE_DISABLE_FIND_PACKAGE_Arrow=ON']
         if kit.exists():
             cmd += ['-DCMAKE_CXX_COMPILER=' + str(kit / 'c++'),
-                    '-DCMAKE_MAKE_PROGRAM=' + str(kit / 'make')]
+                    '-DCMAKE_MAKE_PROGRAM=' + str(kit / 'make'),
+                    '-DCMAKE_AR=' + str(kit.parent / 'sysroot/usr/bin/ar'),
+                    '-DCMAKE_RANLIB=' + str(kit.parent / 'sysroot/usr/bin/ranlib'),
+                    '-DCMAKE_LINKER=' + str(kit.parent / 'sysroot/usr/bin/ld')]
         checked(cmd)
         checked([cmake, '--build', build, '-j', str(jobs)])
         checked([ctest, '--test-dir', build, '--output-on-failure'])
