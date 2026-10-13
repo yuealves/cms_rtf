@@ -25,6 +25,9 @@ add_library(cms_rtf_journal src/journal_input.cpp
 target_include_directories(cms_rtf_journal PUBLIC include PRIVATE third_party/cms_protocol/include)
 target_link_libraries(cms_index500ms_mt PRIVATE cms_rtf_journal)
 
+add_executable(cms_journal_replayer replay/journal_replayer.cpp)
+target_include_directories(cms_journal_replayer PRIVATE include)
+
 option(CMS_RTF_BUILD_AGGREGATE "Build native aggregation and Arrow output" ON)
 if(CMS_RTF_BUILD_AGGREGATE)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)

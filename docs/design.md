@@ -297,15 +297,18 @@ reason 分 watermark、am_timer、pm_timer、eof，收盘延迟不混入正常�
 
 ## 限速 journal 验证（2026-10-13）
 
-`scripts/benchmark_paced_journal.py` 用独立 producer 按原 journal 有效时间间隔 / speed
-向全新的测试 journal 逐帧发布；保留原始帧、校验和、接收时间、日期和序号，复制
-payload 后最后提交 status 字节。消费进程沿用未修改的 follow+source 路径，不能用
-在消费线程内 sleep 的方式替代这一实验，否则会改变“读到”计时起点与队列行为。
-不启停 gateway/paged，不写生产 journal，不修改生产 config/current 输出目录。
+`cms_journal_replayer` 对照 Huatai `546aba2` 的
+`replay/src/journal_replayer.cpp:275–309`：以 steady_clock 为基准，按源时间差 / speed
+计算 deadline 并 sleep_until。CMS 保留单路原始帧序及 extra_nano 优先规则，不照搬
+Huatai 的三路 KyStd 类型筛选/排序；不依赖或启停 paged，不改生产 journal。
 
-盘前历史先快速重建，等待 consumer 读空，再留 1 秒排队缓冲；测量起点前 10 秒
-源时间开始限速，避免盘前快速输入混入开盘结果。默认测量 09:30–09:45，另发送
-5 秒真实后续数据供水位关闭边界窗；没有伪造 END 或强行补窗，读完前缀后只给本次
-consumer 发 SIGTERM。只统计请求区间的有效窗口，与同区间全速基准逐位对照。
-producer 记录每帧实际提交相对 deadline 的偏差、实际速度、原始时间跨度和帧数，
-防止把 producer 跑不满 5x 当成限速实验成功。接收至输出的历史墙钟差不作为实盘指标。
+`--source DIR --dest NEW_DIR --speed 5 --pace-from-ns NS --until-ns NS`：限速区间前
+先快速写入历史以恢复盘口；目标目录必须不存在，拒绝源目录及其子目录。可选
+`--wait-ready` 在限速起点输出 ready_records 并等待 stdin 的 `go`，让测试驱动先确认
+consumer 追上盘前数据。全程只映射当前源页/目标页；与 reader 共用 journal ABI，
+保留原帧字节、hash、接收时间和序号，payload 复制后 release 提交 status。
+
+输出逐帧投放偏差的有界直方图摘要、实际倍速、帧数及源时间跨度。到截止点停止，
+不伪造 END、不补未来窗口；测试跟读用 `--journal-clock source`，历史 recv_ns 到
+当前墙钟的差值不能当作实盘延迟。一次性测试编排放在忽略的 work/，统计复用
+`scripts/summarize_latency.py`，仓库不保留另一套 Python journal 投放器。
