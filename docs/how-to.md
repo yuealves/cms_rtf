@@ -88,7 +88,7 @@ PYTHONPATH=python python3 -m cms_rtf.run_journal_mt \
 原生多线程默认 `--output-mode stream`，窗口贡献在内存中聚合后释放，直接写最终
 Arrow，没有 `w*.book/flow/seeds` 文件。`--window-batch 64` 为加速 replay 的批量
 关窗调度；逐可用端点发布可改为 `1`，500ms 因子本身的粒度不变。
-`--pending-mib 128` 是待聚合 payload 预算，按 worker 均分；水位停滞超限会报错，
+`--pending-mib 256` 是待聚合 payload 预算，按 worker 均分；水位停滞超限会报错，
 不会自动写磁盘。遇到已关窗迟到事件也报错，旧 `--output-mode blocks` 可作诊断对照。
 只有 exporter 与 kernel 都成功，正式 Arrow 才被替换；运行中的临时名称文件
 就是最终 Arrow 格式。已有的逐股对照文件不会被用于新路径的聚合。

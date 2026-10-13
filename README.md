@@ -33,7 +33,7 @@ C++ 与 Python 之间用二进制文件接口（`events.bin`/`book.bin`/`flow.bi
 
 多线程 journal 驱动 `cms_rtf.run_journal_mt` 默认使用 `--output-mode stream`：
 逐股贡献在内存内按窗口聚合、消费后释放，直接写最终 Arrow；**不生成逐股中间文件**。
-`--window-batch 64` 批量调度 replay 窗口，`1` 可逐可用端点发布。`--pending-mib 128`
+`--window-batch 64` 批量调度 replay 窗口，`1` 可逐可用端点发布。`--pending-mib 256`
 限制待聚合记录 payload；通道停滞超预算或出现已关窗的迟到事件会报错，不丢弃数据。
 正式 Arrow 文件名只在 producer 和 consumer 都成功后替换，运行中写的是同一份
 最终格式 Arrow 的临时名称。全部边界见 [设计说明](docs/design.md)。

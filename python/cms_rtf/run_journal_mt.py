@@ -89,8 +89,8 @@ def main():
                    help='default: in-memory window aggregation for C++, legacy for Python')
     p.add_argument('--window-batch', type=int, default=64,
                    help='replay cutoff batching; use 1 for publication at each available endpoint')
-    p.add_argument('--pending-mib', type=int, default=128,
-                   help='total pending-record payload budget, divided across workers; never spills')
+    p.add_argument('--pending-mib', type=int, default=256,
+                   help='total pending-record payload budget, shared across workers; never spills')
     p.add_argument('--kernel', default=str(Path(__file__).resolve().parents[2]
                                            / 'build/cms_index500ms_mt'))
     args = p.parse_args()

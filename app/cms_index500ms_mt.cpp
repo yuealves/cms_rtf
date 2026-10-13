@@ -158,7 +158,7 @@ struct WorkerCtx {
   std::unordered_map<int32_t, SymbolRunner*> states;
   std::unordered_map<int32_t, SymbolBuffers> bufs;
   std::unordered_map<int32_t, std::unique_ptr<WindowRecords>> windows;
-  size_t pending_bytes = 0, peak_pending_bytes = 0;
+  std::unique_ptr<PendingBudget> pending_budget;
   std::atomic<int> closed_target{0};
   std::exception_ptr error;
   BookHealth health;
@@ -172,7 +172,7 @@ struct WorkerCtx {
 int Run(int argc, char** argv) {
   std::string input_path, thresh_path, work_dir;
   std::string output_mode = "blocks";
-  int workers = 8, window_batch = 64, pending_mib = 128;
+  int workers = 8, window_batch = 64, pending_mib = 256;
   std::string reference_path, day, output;
   if (argc % 2 != 1) throw std::runtime_error("each option requires a value");
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -269,12 +269,13 @@ int Run(int argc, char** argv) {
     { std::lock_guard<std::mutex> lock(barrier_mu); worker_failed.store(true); }
     closed_cv.notify_all(); resumed_cv.notify_all();
   };
-  const size_t pending_limit = static_cast<size_t>(pending_mib) * 1024 * 1024 / workers;
+  PendingPool pending_pool(static_cast<size_t>(pending_mib) * 1024 * 1024);
   int64_t spin_waits = 0;
   constexpr size_t kBatchSize = 256;
 
   for (int i = 0; i < workers; ++i) {
     auto ctx = std::make_unique<WorkerCtx>();
+    ctx->pending_budget = std::make_unique<PendingBudget>(&pending_pool);
     ctx->thread = std::thread([&, i, ctx = ctx.get()]() {
       try {
       std::array<EventRec, kBatchSize> batch;
@@ -371,7 +372,6 @@ int Run(int argc, char** argv) {
               if (ev.symbol == -2) runner->Finish(); else runner->CloseThrough(ev.time_ms);
               ctx->windows.at(symbol)->seed_mid = runner->seed_mid();
             }
-            ctx->peak_pending_bytes = std::max(ctx->peak_pending_bytes, ctx->pending_bytes);
             std::unique_lock<std::mutex> lock(barrier_mu);
             ctx->closed_target.store(ev.time_ms, std::memory_order_release);
             closed_cv.notify_one();
@@ -383,7 +383,7 @@ int Run(int argc, char** argv) {
             const auto th = thresh.find(ev.symbol);
             RecordSink* sink;
             if (streaming) {
-              auto window = std::make_unique<WindowRecords>(&ctx->pending_bytes, pending_limit);
+              auto window = std::make_unique<WindowRecords>(ctx->pending_budget.get());
               sink = window.get();
               ctx->windows.emplace(ev.symbol, std::move(window));
             } else {
@@ -485,8 +485,9 @@ int Run(int argc, char** argv) {
     }
     // Flush to the single final-format Arrow stream even while stdin stays open.
     arrow->Flush();
-    for (auto& ctx : ctxs) for (auto& [symbol, window] : ctx->windows) {
-      (void)symbol; window->Consumed();
+    for (auto& ctx : ctxs) {
+      for (auto& [symbol, window] : ctx->windows) { (void)symbol; window->Consumed(); }
+      ctx->pending_budget->Reclaim();
     }
     merge_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - merge_started).count();
 #endif
@@ -549,7 +550,13 @@ int Run(int argc, char** argv) {
       int32_t watermark = kPmCloseMs + 1;
       for (const auto channel : channels) watermark = std::min(watermark, channel_time[channel]);
       const int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
-      if (end - emitted >= window_batch) close_windows(end, false);
+      // CMS closing batches can contain another stock's pre-close rows AFTER
+      // every channel has printed a close timestamp. That timestamp is not an
+      // end-of-session marker. Keep this last jump pending until the next
+      // session (AM) or validated EOF (PM); never drop/rewrite those late rows.
+      const bool closing_batch = (watermark >= kAmCloseMs && watermark <= kPmOpenMs) ||
+                                  watermark >= kPmCloseMs;
+      if (!closing_batch && end - emitted >= window_batch) close_windows(end, false);
     }
   }
   if (input_error) fail_workers();
@@ -583,6 +590,13 @@ int Run(int argc, char** argv) {
   if (!input_failure.empty()) std::cerr << input_failure << "\n";
   if (input_error) std::cerr << "truncated or unreadable DTYPE stream\n";
   if (worker_failed.load()) {
+    if (streaming) {
+      int slowest = -1;
+      for (int c : channels) if (slowest < 0 || channel_time[c] < channel_time[slowest]) slowest = c;
+      std::cerr << "stream stopped: input_rows=" << input_rows << " emitted_endpoints=" << emitted;
+      if (slowest >= 0) std::cerr << " watermark_channel=" << slowest << " watermark_ms=" << channel_time[slowest];
+      std::cerr << '\n';
+    }
     for (auto& ctx : ctxs) if (ctx->error) {
       try { std::rethrow_exception(ctx->error); }
       catch (const std::exception& e) { std::cerr << "worker failed: " << e.what() << "\n"; }
@@ -594,7 +608,7 @@ int Run(int argc, char** argv) {
   if (streaming) arrow->Commit();
 #endif
   size_t pending_peak = 0;
-  for (const auto& ctx : ctxs) pending_peak += ctx->peak_pending_bytes;
+  for (const auto& ctx : ctxs) pending_peak += ctx->pending_budget->peak();
   const auto finished = std::chrono::steady_clock::now();
   const double dispatch_s = std::chrono::duration<double>(dispatched - started).count();
   const double total_s = std::chrono::duration<double>(finished - started).count();
