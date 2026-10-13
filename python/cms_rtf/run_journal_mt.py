@@ -3,7 +3,7 @@
 链路（全 C++ 热路径，无 Python 映射）：
   cms_journal_export（C++ 解析 journal → DTYPE 管道（--keep-stream 可保留文件））
   → cms_index500ms_mt（reader 线程 + symbol hash 分发 + N worker 每股状态机）
-  → Python 聚合（按 symbol 升序，位级一致与 worker 数无关）
+  → C++ 聚合 + Arrow（按 symbol 升序；--aggregate-backend python 可对照）
 
 用法：
   PYTHONPATH=python python3 -m cms_rtf.run_journal_mt \
@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from . import aggregate, refdata
+from . import native_aggregate, refdata
 
 
 def run_pipeline(export_cmd, kernel_cmd, inter, env, keep_stream=False):
@@ -71,6 +71,8 @@ def main():
     p.add_argument('--weights-dir', required=True)
     p.add_argument('--threshold-dir', required=True)
     p.add_argument('--out', required=True)
+    p.add_argument('--aggregate-backend', choices=['cpp', 'python'], default='cpp')
+    p.add_argument('--aggregator', help='native aggregation executable override')
     p.add_argument('--kernel', default=str(Path(__file__).resolve().parents[2]
                                            / 'build/cms_index500ms_mt'))
     args = p.parse_args()
@@ -117,9 +119,9 @@ def main():
     books = sorted(inter.glob('w*.book.bin'))
     flows = sorted(inter.glob('w*.flow.bin'))
     seeds = sorted(inter.glob('w*.seeds.bin'))
-    grid, all_rows = aggregate.aggregate(books, flows, seeds, ref, args.day)
     arrow_path = out_dir / 'index_500ms_exch.arrow'
-    rows = aggregate.write_arrow(grid, all_rows, args.day, arrow_path)
+    rows = native_aggregate.run_backend(args.aggregate_backend, books, flows, seeds,
+                                        ref, args.day, arrow_path, args.aggregator)
     timings['aggregate'] = round(time.time() - t, 1)
     timings['total'] = round(time.time() - t0, 1)
     print(json.dumps(dict(stage='completed', rows=rows, path=str(arrow_path),

@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from . import aggregate, codec, refdata
+from . import codec, native_aggregate, refdata
 
 
 def main():
@@ -29,6 +29,8 @@ def main():
     p.add_argument('--kernel', default=str(Path(__file__).resolve().parents[2]
                                            / 'build/cms_index500ms_day'))
     p.add_argument('--compare', default=None, help='参考 arrow 路径（对拍报告）')
+    p.add_argument('--aggregate-backend', choices=['cpp', 'python'], default='cpp')
+    p.add_argument('--aggregator', help='native aggregation executable override')
     args = p.parse_args()
 
     out_dir = Path(args.out) / 'index_500ms' / args.day
@@ -55,10 +57,10 @@ def main():
                             check=True, capture_output=True, text=True)
     print(json.dumps(dict(stage='kernel', **json.loads(result.stdout))), flush=True)
 
-    grid, all_rows = aggregate.aggregate(inter / 'book.bin', inter / 'flow.bin',
-                                         inter / 'seeds.bin', ref, args.day)
     arrow_path = out_dir / 'index_500ms_exch.arrow'
-    rows = aggregate.write_arrow(grid, all_rows, args.day, arrow_path)
+    rows = native_aggregate.run_backend(args.aggregate_backend, inter / 'book.bin',
+                                        inter / 'flow.bin', inter / 'seeds.bin',
+                                        ref, args.day, arrow_path, args.aggregator)
     print(json.dumps(dict(stage='aggregate', rows=rows, path=str(arrow_path),
                           elapsed_s=round(time.time() - t0, 1))), flush=True)
 

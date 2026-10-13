@@ -19,6 +19,22 @@ target_link_libraries(cms_index500ms_day PRIVATE cms_rtf_core)
 add_executable(cms_index500ms_mt app/cms_index500ms_mt.cpp)
 target_link_libraries(cms_index500ms_mt PRIVATE cms_rtf_core)
 
+option(CMS_RTF_BUILD_AGGREGATE "Build native aggregation and Arrow output" ON)
+if(CMS_RTF_BUILD_AGGREGATE)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  include(cmake/ArrowDependency.cmake)
+  set(catalog_header "${CMAKE_CURRENT_BINARY_DIR}/generated/cms_rtf/catalog.h")
+  add_custom_command(OUTPUT "${catalog_header}"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_catalog.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/python/cms_rtf/catalog.py" "${catalog_header}"
+    DEPENDS scripts/generate_catalog.py python/cms_rtf/catalog.py VERBATIM)
+  add_executable(cms_index500ms_aggregate app/aggregate.cpp "${catalog_header}")
+  target_include_directories(cms_index500ms_aggregate PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  target_link_libraries(cms_index500ms_aggregate PRIVATE ${CMS_RTF_ARROW_TARGET})
+  # Match the separate multiply/add operations of the existing NumPy contract.
+  target_compile_options(cms_index500ms_aggregate PRIVATE -ffp-contract=off)
+endif()
+
 enable_testing()
 add_executable(test_book tests/cpp/test_book.cpp)
 target_link_libraries(test_book PRIVATE cms_rtf_core)

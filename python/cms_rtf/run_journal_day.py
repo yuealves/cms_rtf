@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 
-from . import aggregate, refdata
+from . import native_aggregate, refdata
 from .journal_events import JOURNAL_DTYPE, rows_to_events
 from .codec import EVENT_DTYPE
 
@@ -65,6 +65,8 @@ def main():
     p.add_argument('--weights-dir', required=True)
     p.add_argument('--threshold-dir', required=True)
     p.add_argument('--out', required=True)
+    p.add_argument('--aggregate-backend', choices=['cpp', 'python'], default='cpp')
+    p.add_argument('--aggregator', help='native aggregation executable override')
     p.add_argument('--kernel', default=str(Path(__file__).resolve().parents[2]
                                            / 'build/cms_index500ms_day'))
     args = p.parse_args()
@@ -99,10 +101,10 @@ def main():
                     '--out-book', str(inter / 'book.bin'),
                     '--out-flow', str(inter / 'flow.bin'),
                     '--out-seeds', str(inter / 'seeds.bin')], check=True)
-    grid, all_rows = aggregate.aggregate(inter / 'book.bin', inter / 'flow.bin',
-                                         inter / 'seeds.bin', ref, args.day)
     arrow_path = out_dir / 'index_500ms_exch.arrow'
-    rows = aggregate.write_arrow(grid, all_rows, args.day, arrow_path)
+    rows = native_aggregate.run_backend(args.aggregate_backend, inter / 'book.bin',
+                                        inter / 'flow.bin', inter / 'seeds.bin',
+                                        ref, args.day, arrow_path, args.aggregator)
     print(json.dumps(dict(stage='completed', rows=rows, path=str(arrow_path),
                           total_seconds=round(time.time() - t0, 1))), flush=True)
 

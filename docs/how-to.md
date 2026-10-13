@@ -14,7 +14,7 @@ index_500ms 因子，并知道产出物是什么、怎么和线上参考对拍�
 ## 跑一天（最小命令）
 
 ```bash
-# 0) 一次性准备：编译内核（机器需 cmake + gcc11）
+# 0) 一次性准备：编译内核及聚合器（cmake + gcc11 + Arrow C++ 或现有 PyArrow）
 cmake -S . -B build && cmake --build build -j
 
 # 1) 跑某天（权重/阈值目录里放 ≤ 当天的最新文件即可）
@@ -29,6 +29,12 @@ PYTHONPATH=python python3 -m cms_rtf.run_day \
 ```
 
 2026-10-09 的完整示例（含对拍）：`bash scripts/run_20261009.sh`（端到端 < 10 分钟）。
+
+`run_day`、`run_journal_day`、`run_journal_mt` 默认使用 C++ 聚合和 Arrow 写出；
+`--aggregate-backend python` 可切回原聚合器对拍，`--aggregator <path>` 指定 C++ 可执行文件。
+多 Python 环境构建可指定 `-DPython3_EXECUTABLE=/path/to/python`，以找到正确的 PyArrow
+头文件/动态库；系统 Arrow CMake 包存在时优先使用。只需逐笔内核可用
+`-DCMS_RTF_BUILD_AGGREGATE=OFF`，此时运行要显式选 Python 聚合。
 
 ## 产出物长什么样
 
@@ -92,6 +98,22 @@ PYTHONPATH=python python3 scripts/benchmark_replay.py \
 报告记录两个提交、机器/依赖版本、阶段耗时、健康计数、内核文件 SHA-256 对比和
 最终 106 列逐位检查（包括 null mask、键、schema）。计时复用相同输入，
 不包含一次性的 parquet/cache/journal 准备；机器负载与缓存会影响结果。
+
+新版本 `benchmark_replay.py` 默认对优化版计入 C++ 聚合；复现原 Python 对比时加
+`--aggregate-backend python`。旧版一侧始终加载其自身的 Python 聚合实现。
+
+只比较聚合器，复用相同的 `w*.{book,flow,seeds}.bin`：
+
+```bash
+PYTHONPATH=python python3 scripts/benchmark_aggregate.py \
+  --intermediate <已有 worker 文件目录> \
+  --weights-dir <权重目录> --threshold-dir <阈值目录> --day 20261009 \
+  --reference <已验收 Arrow> --repeats 3 --out <新的结果目录>
+```
+
+每版预热一次后交替顺序运行，各轮独立进程，记录阶段时间及 `/usr/bin/time -v`。
+Python 时间不含导入/参考表加载，C++ 时间包含完整进程启动/退出；逐位验收在计时外。
+详见 [C++ 聚合与内存分析](validation/20261013-cpp-aggregate.md)。
 
 ## 故障排查
 

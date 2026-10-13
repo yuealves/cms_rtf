@@ -16,7 +16,7 @@ import time
 import numpy as np
 import pyarrow as pa
 
-from cms_rtf import aggregate, refdata
+from cms_rtf import aggregate, native_aggregate, refdata
 from cms_rtf.validate_replay import exact_factors
 
 
@@ -43,6 +43,9 @@ def main():
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--check-workers', type=int, help='also verify another worker count')
     p.add_argument('--reference', help='optional previously accepted CMS factor Arrow')
+    p.add_argument('--aggregate-backend', choices=['cpp', 'python'], default='cpp',
+                   help='optimized aggregation backend; baseline always uses its own Python implementation')
+    p.add_argument('--aggregator', help='optimized native aggregation executable override')
     args = p.parse_args()
     root = Path(__file__).resolve().parents[1]
     baseline = Path(args.baseline_root).resolve()
@@ -61,7 +64,7 @@ def main():
                   input_bytes=Path(args.input).stat().st_size,
                   commits={name: subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'],
                            text=True).strip() for name, repo in [('baseline', baseline), ('optimized', root)]},
-                  runs={}, checks={})
+                  optimized_aggregate_backend=args.aggregate_backend, runs={}, checks={})
     runs = [('baseline', baseline, old_aggregate, args.workers),
             ('optimized', root, aggregate, args.workers)]
     if args.check_workers is not None:
@@ -79,10 +82,12 @@ def main():
         health = json.loads((dest / 'kernel.json').read_text())
         print(json.dumps(dict(stage='kernel', run=name, seconds=kernel_s, health=health)), flush=True)
         t = time.monotonic()
-        grid, rows = module.aggregate(sorted(dest.glob('w*.book.bin')),
-                                     sorted(dest.glob('w*.flow.bin')),
-                                     sorted(dest.glob('w*.seeds.bin')), ref, args.day)
-        module.write_arrow(grid, rows, args.day, dest / 'factors.arrow')
+        books, flows, seeds = [sorted(dest.glob(f'w*.{kind}.bin')) for kind in ('book', 'flow', 'seeds')]
+        if name != 'baseline' and args.aggregate_backend == 'cpp':
+            native_aggregate.run(books, flows, seeds, ref, args.day, dest / 'factors.arrow', args.aggregator)
+        else:
+            grid, rows = module.aggregate(books, flows, seeds, ref, args.day)
+            module.write_arrow(grid, rows, args.day, dest / 'factors.arrow')
         agg_s = time.monotonic() - t
         report['runs'][name] = dict(kernel_seconds=kernel_s, aggregate_seconds=agg_s,
                                    total_seconds=kernel_s + agg_s, health=health)

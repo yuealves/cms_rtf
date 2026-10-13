@@ -1,0 +1,225 @@
+{
+  "baseline_commit": "8e18a05593c773bf641d67413b4d11abfb51c93c",
+  "branch": "perf/cpp-aggregate-20261013",
+  "upstream_commit": "546aba2fa733d4f7f7656af0572115287418b12d",
+  "host": "linwei-pc",
+  "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "input": {
+    "day": "20261009",
+    "cutoff": "2026-10-09T09:35:00+08:00",
+    "rows": 40271350,
+    "constituent_events": 17892045,
+    "book_records": 51724800,
+    "flow_records": 1000837,
+    "sha256": "986c7b6c3acd3183e2c14674af104749b88660e134b659d6f7231150a8f61ddd"
+  },
+  "paired": {
+    "runs": [
+      {
+        "name": "python_0",
+        "backend": "python",
+        "seconds": 9.715539243999956,
+        "process_wall_seconds": 10.006365773999278,
+        "max_rss_kib": 14385088,
+        "stages": {
+          "aggregate_seconds": 9.592602325999906,
+          "arrow_seconds": 0.12293691800005035,
+          "seconds": 9.715539243999956
+        }
+      },
+      {
+        "name": "cpp_0",
+        "backend": "cpp",
+        "seconds": 2.76247299300303,
+        "process_wall_seconds": 2.76247299300303,
+        "max_rss_kib": 169284,
+        "stages": {
+          "rows": 115200,
+          "book_records": 51724800,
+          "flow_records": 1000837,
+          "book_seconds": 2.57573,
+          "flow_seconds": 0.0377849,
+          "finalize_seconds": 0.031689,
+          "arrow_seconds": 0.0727893,
+          "total_seconds": 2.73951
+        }
+      },
+      {
+        "name": "cpp_1",
+        "backend": "cpp",
+        "seconds": 3.445861751002667,
+        "process_wall_seconds": 3.445861751002667,
+        "max_rss_kib": 168476,
+        "stages": {
+          "rows": 115200,
+          "book_records": 51724800,
+          "flow_records": 1000837,
+          "book_seconds": 3.22188,
+          "flow_seconds": 0.044298,
+          "finalize_seconds": 0.0354234,
+          "arrow_seconds": 0.0774866,
+          "total_seconds": 3.42183
+        }
+      },
+      {
+        "name": "python_1",
+        "backend": "python",
+        "seconds": 9.711891714996455,
+        "process_wall_seconds": 10.035860699001205,
+        "max_rss_kib": 14379300,
+        "stages": {
+          "aggregate_seconds": 9.596884291997412,
+          "arrow_seconds": 0.11500742299904232,
+          "seconds": 9.711891714996455
+        }
+      },
+      {
+        "name": "python_2",
+        "backend": "python",
+        "seconds": 10.089004453002417,
+        "process_wall_seconds": 10.384902328998578,
+        "max_rss_kib": 14385136,
+        "stages": {
+          "aggregate_seconds": 9.982782316001249,
+          "arrow_seconds": 0.10622213700116845,
+          "seconds": 10.089004453002417
+        }
+      },
+      {
+        "name": "cpp_2",
+        "backend": "cpp",
+        "seconds": 3.027763377998781,
+        "process_wall_seconds": 3.027763377998781,
+        "max_rss_kib": 168496,
+        "stages": {
+          "rows": 115200,
+          "book_records": 51724800,
+          "flow_records": 1000837,
+          "book_seconds": 2.84751,
+          "flow_seconds": 0.0384941,
+          "finalize_seconds": 0.0219404,
+          "arrow_seconds": 0.0696345,
+          "total_seconds": 3.00175
+        }
+      }
+    ],
+    "warmups": [
+      {
+        "name": "cpp_warmup",
+        "backend": "cpp",
+        "seconds": 2.8946442609994847,
+        "process_wall_seconds": 2.8946442609994847,
+        "max_rss_kib": 169140,
+        "stages": {
+          "rows": 115200,
+          "book_records": 51724800,
+          "flow_records": 1000837,
+          "book_seconds": 2.69442,
+          "flow_seconds": 0.0416597,
+          "finalize_seconds": 0.0348269,
+          "arrow_seconds": 0.0773451,
+          "total_seconds": 2.87074
+        }
+      },
+      {
+        "name": "python_warmup",
+        "backend": "python",
+        "seconds": 9.446380769997631,
+        "process_wall_seconds": 9.765663739999582,
+        "max_rss_kib": 14385908,
+        "stages": {
+          "aggregate_seconds": 9.315902270998777,
+          "arrow_seconds": 0.13047849899885477,
+          "seconds": 9.446380769997631
+        }
+      }
+    ],
+    "median_seconds": {
+      "python": 9.715539243999956,
+      "cpp": 3.027763377998781
+    },
+    "speedup": 3.2088172129294668,
+    "passed": true,
+    "median_max_rss_kib": {
+      "python": 14385088,
+      "cpp": 168496
+    }
+  },
+  "checks": [
+    {
+      "name": "python_0",
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    },
+    {
+      "name": "cpp_0",
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    },
+    {
+      "name": "cpp_1",
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    },
+    {
+      "name": "python_1",
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    },
+    {
+      "name": "python_2",
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    },
+    {
+      "name": "cpp_2",
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    }
+  ],
+  "pipeline": {
+    "kernel_seconds": 6.562323432000994,
+    "aggregate_seconds": 2.8363589020009385,
+    "total_seconds": 9.398682334001933,
+    "rows": 115200
+  },
+  "pipeline_check": {
+    "rows": 115200,
+    "keys_equal": true,
+    "keys_unique": true,
+    "exact_columns": 106,
+    "total_columns": 106
+  },
+  "full_day_memory_evidence": {
+    "source": "gy_dev:/data/users/linwei/cms_work/perf_20261013/full/optimized",
+    "book_bytes": 14482944000,
+    "book_records": 51724800,
+    "flow_bytes": 5764063888,
+    "flow_records": 32750363,
+    "symbols_with_records": 1796,
+    "book_vector_capacity_bytes": 16478371840,
+    "prior_kernel_peak_rss_kib": 23991824
+  },
+  "tests": {
+    "ctest": 4,
+    "python_unittest": 32
+  }
+}

@@ -47,7 +47,8 @@ parquet 分片 --codec.py--> events.bin (56B/条, 按 symbol 分组, 组内 jour
 events.bin --cms_index500ms_day--> book.bin  (端点捕获：31 特征 + mid + act + valid)
                                  + flow.bin  (非空桶 21 基础量)
                                  + seeds.bin (开盘收益前值 mid)
-book/flow/seeds --aggregate.py--> index_500ms_exch.arrow (115,200 行 × 108 列)
+book/flow/seeds --cms_index500ms_aggregate--> index_500ms_exch.arrow (115,200 行 × 108 列)
+                 aggregate.py 保留为 Python 对照后端
 ```
 
 内核移植自 light_rtf，逐字保留三处关键语义：
@@ -90,3 +91,28 @@ book/flow/seeds --aggregate.py--> index_500ms_exch.arrow (115,200 行 × 108 列
 聚合按 symbol 升序遍历各 worker 文件的 mmap 视图，免去全量 concatenate 拷贝。
 每股流量端点严格递增时用向量索引相加；重复端点仍走 `np.add.at`，
 股票加权顺序和每次 Float64 运算不变。
+
+## C++ 聚合和 Arrow 输出（2026-10-13）
+
+`app/aggregate.cpp` 对照 gy_dev 上 light_rtf_v2 `546aba2` 的
+`light_rtf/src/factors/index_500ms/aggregate.cpp:25–172` 与
+`light_rtf/src/output/arrow_stream_sink.cpp` 移植。四指数、80% 覆盖门、31+1 盘口列、
+21 基础量、16/13 派生列、10 桶 Float32→Float64 滚动、午休重启均沿用现有口径。
+
+读取逐笔内核已经按 symbol 升序写出的 worker 文件，以固定缓冲合并股票分组，
+每次只持有一只股票的记录和四指数全天累加器。避免全日 mmap 页长期计入进程 RSS。
+同一 symbol 出现在多个文件时稳定保留输入文件顺序；流量重复/逆序端点逐条累加；
+截断记录、非法参考版本、非升序 symbol/盘口端点拒绝运行。既有 BookRec280、
+FlowRec176、Seed12 布局完全不变。输出列名由 catalog.py 在构建时生成，避免两份目录漂移。
+
+Python 仅准备权重参考和启动 C++；新侧输入 `CMSAG01\0` 为 magic[8]、小端 u32
+股票数、4 个 Float64 官方分母、逐股 int32 symbol + 4 个 Float64 权重。
+官方分母直接保留现有 NumPy 求和值，不在 C++ 重排求和；禁止融合乘加。
+5s 求和按已有 Python 窗口的时间顺序进行，不对滚动和做减法。
+mid 使用 `log(mid)-log(prev)`，无效前值不回退。写出保持现有 CMS 的 NaN→null，
+Inf 仍是有效值（华泰 sink 对 Inf 也置 null；本轮不改变既有 CMS 输出契约）。
+
+Arrow 采用 1,024 端点/批的 IPC stream，列类型、行序、无时区北京墙钟时间不变；
+批边界不属于数据契约。写入同目录临时文件，正常关闭后替换目标，失败保留旧输出。
+逐笔内核仍然缓存全天逐股端点结果到 EOF；此次原生聚合没有改成实时水位关窗。
+所以聚合阶段内存下降不代表全天逐笔内核的约 22.9 GiB 峰值已消除。

@@ -22,7 +22,8 @@ python/cms_rtf/codec.py      parquet → canonical 事件流（字段映射实�
                              docs/validation/20261009-field-mapping.md）
 build/cms_index500ms_day     C++ 内核：簿重建 + 流量状态机 + 端点捕获
                              （逐字移植 light_rtf l2_book / state.cpp / book_capture）
-python/cms_rtf/aggregate.py  跨股票加权聚合 + 派生列 + 5s 滚动 → Arrow
+build/cms_index500ms_aggregate  C++ 跨股票加权聚合 + 派生列 + 5s 滚动 → Arrow
+python/cms_rtf/aggregate.py    保留的 Python 对照实现（--aggregate-backend python）
 python/cms_rtf/run_day.py    日级驱动；--compare 生成对拍报告
 ```
 
@@ -30,6 +31,10 @@ C++ 与 Python 之间用二进制文件接口（`events.bin`/`book.bin`/`flow.bi
 布局与 `include/cms_rtf/events.h` 的结构体逐字节一致、有 static_assert 守护）。
 
 ## 构建与测试
+
+聚合默认使用 C++。构建需要 Arrow C++，也可直接使用现有 PyArrow 安装内的头文件和
+动态库；CMake 会自动发现。多 Python 环境可指定 `-DPython3_EXECUTABLE=/path/to/python`。
+仅构建逐笔内核可用 `-DCMS_RTF_BUILD_AGGREGATE=OFF`，运行时需显式选 Python 聚合。
 
 ```bash
 cmake -S . -B build && cmake --build build -j
