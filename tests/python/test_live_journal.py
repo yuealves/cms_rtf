@@ -55,9 +55,12 @@ class JournalWriter:
         self.page += 1; self.pos = 137; self.frames = 0
         self.path = self.directory / f'yjj.cms_l2_raw_v1.{self.page}.journal'
         with self.path.open('wb') as f:
-            f.write(struct.pack('<B30shqqiih6s72s', 1, b'cms_l2_raw_v1', self.page,
-                                DAY0, -1, 0, 0, 2, bytes(6), bytes(72)))
+            # Match the real writer: size the page before publishing its header.
+            # Otherwise a follower can observe a transient 137-byte file.
             f.truncate(128 * 1024 * 1024)
+            f.write(struct.pack('<B30shqqiih6s72s', 0, b'cms_l2_raw_v1', self.page,
+                                DAY0, -1, 0, 0, 2, bytes(6), bytes(72)))
+            f.flush(); f.seek(0); f.write(b'\x01')
 
     def append(self, kind, ms, payload=b'', commit=True):
         self.seq += 1

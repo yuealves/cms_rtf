@@ -294,3 +294,18 @@ reason 分 watermark、am_timer、pm_timer、eof，收盘延迟不混入正常�
 `scripts/summarize_latency.py` 按 mode/phase/reason 分组，默认排除空窗口和交易时段外
 样本，输出 mean/P50/P95/P99/P999/max 与超阈值数；支持正在追加的文件，忽略尾部
 未写完整的一行。日志既有路径拒绝覆盖，运行失败时保留已经写出的诊断前缀。
+
+## 限速 journal 验证（2026-10-13）
+
+`scripts/benchmark_paced_journal.py` 用独立 producer 按原 journal 有效时间间隔 / speed
+向全新的测试 journal 逐帧发布；保留原始帧、校验和、接收时间、日期和序号，复制
+payload 后最后提交 status 字节。消费进程沿用未修改的 follow+source 路径，不能用
+在消费线程内 sleep 的方式替代这一实验，否则会改变“读到”计时起点与队列行为。
+不启停 gateway/paged，不写生产 journal，不修改生产 config/current 输出目录。
+
+盘前历史先快速重建，等待 consumer 读空，再留 1 秒排队缓冲；测量起点前 10 秒
+源时间开始限速，避免盘前快速输入混入开盘结果。默认测量 09:30–09:45，另发送
+5 秒真实后续数据供水位关闭边界窗；没有伪造 END 或强行补窗，读完前缀后只给本次
+consumer 发 SIGTERM。只统计请求区间的有效窗口，与同区间全速基准逐位对照。
+producer 记录每帧实际提交相对 deadline 的偏差、实际速度、原始时间跨度和帧数，
+防止把 producer 跑不满 5x 当成限速实验成功。接收至输出的历史墙钟差不作为实盘指标。
