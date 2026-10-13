@@ -28,9 +28,15 @@ if(CMS_RTF_BUILD_AGGREGATE)
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/generate_catalog.py"
       "${CMAKE_CURRENT_SOURCE_DIR}/python/cms_rtf/catalog.py" "${catalog_header}"
     DEPENDS scripts/generate_catalog.py python/cms_rtf/catalog.py VERBATIM)
-  add_executable(cms_index500ms_aggregate app/aggregate.cpp "${catalog_header}")
-  target_include_directories(cms_index500ms_aggregate PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated")
-  target_link_libraries(cms_index500ms_aggregate PRIVATE ${CMS_RTF_ARROW_TARGET})
+  add_library(cms_rtf_aggregate src/aggregate.cpp "${catalog_header}")
+  target_include_directories(cms_rtf_aggregate PUBLIC include "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  target_link_libraries(cms_rtf_aggregate PUBLIC ${CMS_RTF_ARROW_TARGET})
+  target_compile_options(cms_rtf_aggregate PRIVATE -ffp-contract=off)
+  add_executable(cms_index500ms_aggregate app/aggregate.cpp)
+  target_link_libraries(cms_index500ms_aggregate PRIVATE cms_rtf_aggregate)
+  target_link_libraries(cms_index500ms_mt PRIVATE cms_rtf_aggregate)
+  target_compile_definitions(cms_index500ms_mt PRIVATE CMS_RTF_HAS_ARROW=1)
+  target_compile_options(cms_index500ms_mt PRIVATE -ffp-contract=off)
   # Match the separate multiply/add operations of the existing NumPy contract.
   target_compile_options(cms_index500ms_aggregate PRIVATE -ffp-contract=off)
 endif()

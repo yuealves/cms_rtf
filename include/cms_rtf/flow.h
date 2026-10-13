@@ -103,6 +103,11 @@ class SymbolFlow {
   size_t sh_order_identities() const { return sh_orders_.size(); }
   size_t sh_identity_capacity_bytes() const { return sh_orders_.capacity_bytes(); }
 
+  // Huatai AdvanceExchTo: the dispatcher has established that every observed
+  // channel crossed this endpoint. Seal quiet stocks without waiting for an event.
+  template <typename Emit>
+  void CloseThrough(int32_t ep, Emit&& emit) { AdvanceTo(ep + kGridMs, emit); }
+
  private:
   double thresh_xl_, thresh_m_;
   FlowBases cur_{};

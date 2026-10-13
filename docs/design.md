@@ -159,3 +159,43 @@ SH 全天身份表保留全部成交/委托的身份信息，未删除“已成�
 JSON 中 output/identity capacity 是各股 EOF 前容量求和，不是 RSS 峰值时刻堆剖析；
 allocator、ring、活跃簿等仍包含在进程 RSS 中。稀疏 BookRec 按网格展开后与旧版逐字节
 SHA256 对照，FlowRec/Seed12 直接对照，再检查全部 106 列、null mask、键与健康计数。
+
+## 内存内聚合路径（2026-10-13，替代逐股中间文件）
+
+`run_journal_mt` 的 C++ 默认路径改为 `--output-mode stream`：dispatcher → worker
+簿/流量 → 内存中的待聚合记录 → 固定 symbol 顺序聚合 → 单个最终 Arrow stream。
+`blocks` / `legacy` 仅显式保留为离线对照路径。BookRec/FlowRec/Seed12 和 CMSBLK01
+的旧接口未修改；新路径不生成这些文件。CMSAG01 权重及阈值仍是小型参考输入。
+
+参考 Huatai `546aba2` 的 `worker.cpp:286–352`：跨 worker 的同通道时间取最大，
+跨通道取最小；水位严格大于端点才关闭。FIFO 控制消息排在此前事件之后，所有
+worker 到达屏障后封闭安静股票的流量与捕获；聚合仍逐 symbol 升序，不先做 worker
+部分和。消费完的逐股记录立即移出缓存，只保留 carry-forward 捕获及前值。
+派生公式与旧聚合器共用 C++ 模块，滚动环仅保留 10 桶 Float32，按时间序以
+Float64 重算，午休重启。只缓存有限的最终 Arrow 行，不保留全天逐股结果。
+
+`--window-batch 64` 是加速 replay 的调度批次（最多按已推进的 64 个端点成组触发），
+并未合并 500ms 因子；逐端点发布选 `--window-batch 1`。每次读到可用输入后检查
+水位，文件大块读取可能一次跨过多个端点。屏障聚合期间 worker 使用条件变量等待。
+只跟踪参考成分股实际观察到的 `(exchange, channel)`，与当前 Huatai worker 一致。
+
+与 Huatai 实盘和旧 CMS 离线路径的差异必须显式区分：
+
+- Huatai 对已发布端点不回改，并抑制迟到流量；新 CMS 路径保守地**拒绝**时间戳
+  落后于已发布端点的后续事件，报 symbol/event_ms/closed_ms，整个运行失败，
+  不静默丢弃或给出成功输出。旧 blocks/legacy 保留无限等待的原有离线语义。
+- replay 的 EOF 仍补齐 28,800 端点，以便沿用现有截断样本的全天输出契约；没有
+  EOF 时按通道水位发布，不以普通轮询或 replay 加速墙钟充当会话超时。
+  本修改没有新增 journal follower 或实盘会话定时器。
+- `--pending-mib 128` 限制待聚合记录的有效 payload 总预算，均分给 worker。
+  通道长时间停滞会明确失败，不溢出丢数据，也不转而写磁盘。vector 容量、
+  盘口和 SH 全天身份另计；此参数不是全进程 RSS 上限。
+- Arrow 写入同目录 `.tmp.PID`，内容就是最终 108 列 Arrow，成功关闭后 rename；
+  没有第二套逐股中间文件，也没有逐股数据回读。运行中每轮聚合 flush 可观察
+  已完成的 record batch。Python 驱动还等待 exporter 成功，再发布正式文件名，
+  防止 producer 失败被误当正常 EOF。失败保留上次正式输出。
+
+本地 20261009 的 09:35 前 40,271,350 条原始记录，16 worker，初轮交替测试：
+106 列/空值掩码/键与已接受输出逐位相同，健康计数相同；新侧约 2.51–2.62s，
+峰值约 0.587 GiB，逐股中间文件 0 字节。全天指标以独立验证文档为准。
+EOF 的压缩 SH 身份表与活跃委托没有删除；最终 Arrow 的 batch 边界可能不同。

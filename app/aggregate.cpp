@@ -25,66 +25,16 @@
 
 #include "cms_rtf/catalog.h"
 #include "cms_rtf/events.h"
+#include "cms_rtf/aggregate.h"
 #include "cms_rtf/record_blocks.h"
 
 namespace {
 using namespace cms_rtf;
+using namespace cms_rtf::aggregation;
 using Clock = std::chrono::steady_clock;
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
-constexpr double kMinCoverage = 0.8;  // upstream aggregate.cpp
-constexpr int kNumIndices = 4;
-constexpr int kNumBases = 21;
-constexpr int kRollingLen = 10;
-
-void Check(const arrow::Status& s) {
-  if (!s.ok()) throw std::runtime_error(s.ToString());
-}
-template<class T> T Value(arrow::Result<T> r) {
-  if (!r.ok()) throw std::runtime_error(r.status().ToString());
-  return std::move(*r);
-}
-double Seconds(Clock::time_point start) {
-  return std::chrono::duration<double>(Clock::now() - start).count();
-}
-template<class T> void Read(std::istream& in, T& v) {
-  if (!in.read(reinterpret_cast<char*>(&v), sizeof(v)))
-    throw std::runtime_error("truncated reference/seed file");
-}
-
-struct Reference {
-  std::array<double, kNumIndices> official;
-  std::map<int32_t, std::array<double, kNumIndices>> weights;
-};
-Reference ReadReference(const std::string& path) {
-  std::ifstream in(path, std::ios::binary);
-  char magic[8];
-  if (!in.read(magic, 8) || std::memcmp(magic, "CMSAG01\0", 8))
-    throw std::runtime_error("invalid aggregation reference version");
-  uint32_t count;
-  Read(in, count);
-  if (count > 1000000 || std::filesystem::file_size(path) != 44ULL + count * 36ULL)
-    throw std::runtime_error("invalid aggregation reference length");
-  Reference ref;
-  for (double& v : ref.official) {
-    Read(in, v);
-    if (!std::isfinite(v) || v < 0) throw std::runtime_error("invalid official weight");
-  }
-  int32_t previous = -1;
-  for (uint32_t i = 0; i < count; ++i) {
-    int32_t symbol;
-    Read(in, symbol);
-    if (symbol <= previous || symbol >= 1000000)
-      throw std::runtime_error("reference symbols must be unique and ascending");
-    previous = symbol;
-    auto& w = ref.weights[symbol];
-    for (double& v : w) {
-      Read(in, v);
-      if (!std::isfinite(v) || v < 0) throw std::runtime_error("invalid member weight");
-    }
-  }
-  return ref;
-}
-
+double Seconds(Clock::time_point start) { return std::chrono::duration<double>(Clock::now() - start).count(); }
+template<class T> void Read(std::istream& in, T& v) { if (!in.read(reinterpret_cast<char*>(&v), sizeof(v))) throw std::runtime_error("truncated reference/seed file"); }
 // Bounded buffered readers, not a full-day mmap: consumed records don't remain
 // in the process RSS. Worker files are emitted in ascending symbol order.
 template<class T> class Reader {
@@ -161,21 +111,6 @@ template<class T, class Fn> uint64_t ForSymbols(const std::vector<InputPath>& pa
   return count;
 }
 
-struct Endpoint {
-  double num[32]{}, den[32]{};
-  double valid_weight = 0, age = 0, fresh = 0;
-  double flow[kNumBases]{}, active[3]{};
-};
-using Accumulators = std::array<std::vector<Endpoint>, kNumIndices>;
-using FactorRow = std::array<float, 106>;
-
-std::vector<int32_t> Grid() {
-  std::vector<int32_t> grid;
-  for (int t = kAmOpenMs; t <= kAmCloseMs; t += kGridMs) grid.push_back(t);
-  for (int t = kPmOpenMs + kGridMs; t <= kPmCloseMs; t += kGridMs) grid.push_back(t);
-  return grid;
-}
-
 void AddBook(int32_t symbol, const std::vector<BookRec>& records, const Reference& ref,
              const std::map<int32_t, double>& seeds, const std::vector<int32_t>& grid,
              Accumulators& out) {
@@ -244,113 +179,6 @@ void AddFlow(int32_t symbol, const std::vector<FlowRec>& records, const Referenc
   }
 }
 
-double Imbalance(double buy, double sell) {
-  const double den = buy + sell;
-  return den > 0 ? std::clamp((buy - sell) / den, -1.0, 1.0) : 0.0;
-}
-double Ratio(double num, double den) {
-  return den > 0 ? std::clamp(num / den, 0.0, 1.0) : 0.0;
-}
-void Derived500(const double* b, const double* active, float* out) {
-  const double values[] = {
-    Imbalance(b[0], b[1]), Imbalance(b[2], b[3]), Imbalance(b[4], b[5]),
-    Ratio(b[6], b[4] + b[5]), Ratio(b[7], b[4] + b[5]), Ratio(b[8], b[0] + b[1]), active[0],
-    Imbalance(b[9], b[10]), Imbalance(b[11], b[12]), active[1],
-    Imbalance(b[13], b[14]), Imbalance(b[15], b[16]), Imbalance(b[17], b[18]),
-    Ratio(b[19], b[17] + b[18]), Ratio(b[20], b[17] + b[18]), active[2]};
-  std::copy(std::begin(values), std::end(values), out);
-}
-void Derived5s(const double* b, float* out) {
-  const double values[] = {
-    Imbalance(b[0], b[1]), Imbalance(b[2], b[3]), Imbalance(b[4], b[5]),
-    Ratio(b[6], b[4] + b[5]), Ratio(b[7], b[4] + b[5]),
-    Imbalance(b[9], b[10]), Imbalance(b[11], b[12]),
-    Imbalance(b[13], b[14]), Imbalance(b[15], b[16]), Imbalance(b[17], b[18]),
-    Ratio(b[19], b[17] + b[18]), Ratio(b[20], b[17] + b[18]), Ratio(b[8], b[0] + b[1])};
-  std::copy(std::begin(values), std::end(values), out);
-}
-
-std::array<std::vector<FactorRow>, kNumIndices> Finalize(const Accumulators& acc,
-                                                      const Reference& ref) {
-  std::array<std::vector<FactorRow>, kNumIndices> out;
-  for (int idx = 0; idx < kNumIndices; ++idx) {
-    out[idx].resize(kNumEndpoints);
-    const double official = ref.official[idx];
-    for (int e = 0; e < kNumEndpoints; ++e) {
-      const auto& a = acc[idx][e];
-      auto& row = out[idx][e];
-      for (int c = 0; c < 32; ++c)
-        row[c] = a.den[c] > 0 && a.den[c] / official >= kMinCoverage ? a.num[c] / a.den[c] : kNaN;
-      const double coverage = official > 0 ? std::clamp(a.valid_weight / official, 0.0, 1.0) : 0;
-      row[32] = coverage;
-      row[33] = a.valid_weight > 0 && coverage >= kMinCoverage ? a.age / a.valid_weight : kNaN;
-      row[34] = official > 0 ? std::clamp(a.fresh / official, 0.0, 1.0) : 0;
-      double flow[kNumBases], active[3];
-      for (int c = 0; c < kNumBases; ++c) row[35 + c] = flow[c] = a.flow[c] / official;
-      for (int c = 0; c < 3; ++c) active[c] = a.active[c] / official;
-      Derived500(flow, active, row.data() + 56);
-      double rolling[kNumBases]{};
-      const int session_start = e < 14400 ? 0 : 14400;
-      // Chronological Float64 sum of the last <=10 published Float32 values,
-      // matching NumPy's existing window order, without subtractive residuals.
-      for (int t = std::max(session_start, e - kRollingLen + 1); t <= e; ++t)
-        for (int c = 0; c < kNumBases; ++c) rolling[c] += out[idx][t][35 + c];
-      for (int c = 0; c < kNumBases; ++c) row[72 + c] = rolling[c];
-      Derived5s(rolling, row.data() + 93);
-    }
-  }
-  return out;
-}
-
-int64_t DayStart(const std::string& day) {
-  if (day.size() != 8 || day.find_first_not_of("0123456789") != std::string::npos)
-    throw std::runtime_error("day must be YYYYMMDD");
-  std::tm tm{};
-  const int year = std::stoi(day.substr(0, 4)), month = std::stoi(day.substr(4, 2));
-  const int date = std::stoi(day.substr(6, 2));
-  tm.tm_year = year - 1900; tm.tm_mon = month - 1; tm.tm_mday = date;
-  const auto seconds = timegm(&tm);
-  if (tm.tm_year != year - 1900 || tm.tm_mon != month - 1 || tm.tm_mday != date)
-    throw std::runtime_error("invalid day");
-  return static_cast<int64_t>(seconds) * 1000000;  // naive Beijing wall-clock date
-}
-
-void WriteArrow(const std::string& path, int64_t day0, const std::vector<int32_t>& grid,
-                const std::array<std::vector<FactorRow>, kNumIndices>& rows) {
-  std::vector<std::shared_ptr<arrow::Field>> fields = {
-    arrow::field("datetime", arrow::timestamp(arrow::TimeUnit::MICRO)), arrow::field("code", arrow::utf8())};
-  for (const char* name : kColumnNames) fields.push_back(arrow::field(name, arrow::float32()));
-  const auto schema = arrow::schema(fields);
-  auto file = Value(arrow::io::FileOutputStream::Open(path));
-  auto writer = Value(arrow::ipc::MakeStreamWriter(file, schema));
-  constexpr int kBatchEndpoints = 1024;
-  for (int lo = 0; lo < kNumEndpoints; lo += kBatchEndpoints) {
-    const int hi = std::min(lo + kBatchEndpoints, kNumEndpoints);
-    const int n = (hi - lo) * kNumIndices;
-    arrow::TimestampBuilder datetime(arrow::timestamp(arrow::TimeUnit::MICRO), arrow::default_memory_pool());
-    arrow::StringBuilder code;
-    Check(datetime.Reserve(n)); Check(code.Reserve(n));
-    for (int e = lo; e < hi; ++e) for (int idx = 0; idx < kNumIndices; ++idx) {
-      Check(datetime.Append(day0 + static_cast<int64_t>(grid[e]) * 1000));
-      Check(code.Append(kIndexCodes[idx]));
-    }
-    std::vector<std::shared_ptr<arrow::Array>> arrays = {Value(datetime.Finish()), Value(code.Finish())};
-    for (int c = 0; c < 106; ++c) {
-      arrow::FloatBuilder values;
-      Check(values.Reserve(n));
-      for (int e = lo; e < hi; ++e) for (int idx = 0; idx < kNumIndices; ++idx) {
-        const float v = rows[idx][e][c];
-        // Match PyArrow from_pandas=True: NaN is null; infinity stays a value.
-        if (std::isnan(v)) Check(values.AppendNull()); else Check(values.Append(v));
-      }
-      arrays.push_back(Value(values.Finish()));
-    }
-    Check(writer->WriteRecordBatch(*arrow::RecordBatch::Make(schema, n, arrays)));
-  }
-  Check(writer->Close());
-  Check(file->Close());
-}
-
 int Run(int argc, char** argv) {
   std::string reference, day, output;
   std::vector<InputPath> books, flows;
@@ -394,19 +222,15 @@ int Run(int argc, char** argv) {
   const auto nflow = ForSymbols<FlowRec>(flows, [&](int32_t s, const auto& r) { AddFlow(s, r, ref, grid, acc); });
   const double flow_s = Seconds(t);
   t = Clock::now();
-  auto rows = Finalize(acc, ref);
-  const double finalize_s = Seconds(t);
-  t = Clock::now();
-  // A failed write must not replace a previously accepted output.
-  const std::string temporary = output + ".tmp." + std::to_string(getpid());
-  try {
-    WriteArrow(temporary, day0, grid, rows);
-    std::filesystem::rename(temporary, output);
-  } catch (...) {
-    std::error_code ignored;
-    std::filesystem::remove(temporary, ignored);
-    throw;
+  RollingFinalizer finalizer;
+  ArrowOutput output_stream(output, day0);
+  const double finalize_s = 0;
+  for (int e = 0; e < kNumEndpoints; ++e) {
+    std::array<Endpoint, kNumIndices> window;
+    for (int i = 0; i < kNumIndices; ++i) window[i] = acc[i][e];
+    output_stream.Append(grid[e], finalizer.Publish(e, window, ref));
   }
+  output_stream.Commit();
   const double write_s = Seconds(t);
   std::cout << "{\"rows\": " << kNumEndpoints * kNumIndices << ", \"book_records\": " << nbook
             << ", \"flow_records\": " << nflow << ", \"book_seconds\": " << book_s

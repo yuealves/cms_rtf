@@ -73,16 +73,22 @@ def main():
     p.add_argument('--out', required=True)
     p.add_argument('--aggregate-backend', choices=['cpp', 'python'], default='cpp')
     p.add_argument('--aggregator', help='native aggregation executable override')
-    p.add_argument('--output-mode', choices=['blocks', 'legacy'],
-                   help='default: bounded blocks for C++, legacy for Python aggregation')
+    p.add_argument('--output-mode', choices=['stream', 'blocks', 'legacy'],
+                   help='default: in-memory window aggregation for C++, legacy for Python')
+    p.add_argument('--window-batch', type=int, default=64,
+                   help='replay cutoff batching; use 1 for publication at each available endpoint')
+    p.add_argument('--pending-mib', type=int, default=128,
+                   help='total pending-record payload budget, divided across workers; never spills')
     p.add_argument('--kernel', default=str(Path(__file__).resolve().parents[2]
                                            / 'build/cms_index500ms_mt'))
     args = p.parse_args()
     if not 1 <= args.workers <= 64 or args.export_threads < 1:
         p.error('workers must be 1..64 and export-threads must be positive')
-    output_mode = args.output_mode or ('blocks' if args.aggregate_backend == 'cpp' else 'legacy')
-    if args.aggregate_backend == 'python' and output_mode == 'blocks':
+    output_mode = args.output_mode or ('stream' if args.aggregate_backend == 'cpp' else 'legacy')
+    if args.aggregate_backend == 'python' and output_mode != 'legacy':
         p.error('Python aggregation requires --output-mode legacy')
+    if args.window_batch < 1 or args.pending_mib < 1:
+        p.error('window-batch and pending-mib must be positive')
 
     out_dir = Path(args.out) / 'index_500ms' / args.day
     inter = out_dir / 'intermediate'
@@ -114,18 +120,34 @@ def main():
                   '--threads', str(args.export_threads)]
     kernel_cmd = [args.kernel, '--thresh', str(inter / 'thresh.bin'),
                   '--work-dir', str(inter), '--workers', str(args.workers), '--output-mode', output_mode]
-    health, stages = run_pipeline(export_cmd, kernel_cmd, inter, env, args.keep_stream)
+    arrow_path = out_dir / 'index_500ms_exch.arrow'
+    # A producer can return failure after writing valid, complete rows. Publish
+    # only after BOTH stages succeed; the pending file is the final Arrow itself.
+    pending_arrow = out_dir / f'.index_500ms_exch.pending.{os.getpid()}.arrow'
+    if output_mode == 'stream':
+        reference = inter / 'reference.bin'
+        native_aggregate.write_reference(ref, reference)
+        kernel_cmd += ['--ref', str(reference), '--day', args.day, '--out', str(pending_arrow),
+                       '--window-batch', str(args.window_batch), '--pending-mib', str(args.pending_mib)]
+    try:
+        health, stages = run_pipeline(export_cmd, kernel_cmd, inter, env, args.keep_stream)
+        if output_mode == 'stream':
+            pending_arrow.replace(arrow_path)
+    finally:
+        pending_arrow.unlink(missing_ok=True)
     timings.update({k: round(v, 3) for k, v in stages.items()})
     (inter / 'kernel.summary.json').write_text(json.dumps(health, indent=2) + '\n')
     print(json.dumps(dict(stage='export_kernel', timings=timings, **health)), flush=True)
 
     # 3) 聚合（按 symbol 升序 → 与 worker 数位级一致）
     t = time.time()
-    books, flows, seeds = native_aggregate.worker_paths(inter)
-    arrow_path = out_dir / 'index_500ms_exch.arrow'
-    rows = native_aggregate.run_backend(args.aggregate_backend, books, flows, seeds,
-                                        ref, args.day, arrow_path, args.aggregator)
-    timings['aggregate'] = round(time.time() - t, 1)
+    if output_mode == 'stream':
+        rows = health['emitted_endpoints'] * 4
+    else:
+        books, flows, seeds = native_aggregate.worker_paths(inter)
+        rows = native_aggregate.run_backend(args.aggregate_backend, books, flows, seeds,
+                                            ref, args.day, arrow_path, args.aggregator)
+        timings['aggregate'] = round(time.time() - t, 1)
     timings['total'] = round(time.time() - t0, 1)
     print(json.dumps(dict(stage='completed', rows=rows, path=str(arrow_path),
                           timings=timings)), flush=True)

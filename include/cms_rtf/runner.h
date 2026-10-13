@@ -100,6 +100,11 @@ class SymbolRunner {
   }
 
   double seed_mid() const { return seed_mid_; }
+
+  void CloseThrough(int end) {
+    flow_.CloseThrough(grid_[end - 1], [this](int32_t ep, const double* bases) { EmitFlow(ep, bases); });
+    if (grid_pos_ >= 0 && grid_pos_ < end) { SealTo(end); grid_pos_ = end; }
+  }
   const BookHealth& health() const { return book_.health(); }
   int64_t non_monotonic() const { return flow_.non_monotonic(); }
   size_t live_orders() const { return book_.live_orders(); }

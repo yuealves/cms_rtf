@@ -31,6 +31,13 @@
 #include "cms_rtf/events.h"
 #include "cms_rtf/runner.h"
 #include "cms_rtf/record_blocks.h"
+#include "cms_rtf/window_records.h"
+#ifdef CMS_RTF_HAS_ARROW
+#include "cms_rtf/aggregate.h"
+#endif
+#include <cmath>
+#include <condition_variable>
+#include <mutex>
 
 namespace {
 
@@ -149,6 +156,9 @@ struct WorkerCtx {
   std::thread thread;
   std::unordered_map<int32_t, SymbolRunner*> states;
   std::unordered_map<int32_t, SymbolBuffers> bufs;
+  std::unordered_map<int32_t, std::unique_ptr<WindowRecords>> windows;
+  size_t pending_bytes = 0, peak_pending_bytes = 0;
+  std::atomic<int> closed_target{0};
   std::exception_ptr error;
   BookHealth health;
   int64_t nonmono = 0;
@@ -158,10 +168,12 @@ struct WorkerCtx {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int Run(int argc, char** argv) {
   std::string input_path, thresh_path, work_dir;
   std::string output_mode = "blocks";
-  int workers = 8;
+  int workers = 8, window_batch = 64, pending_mib = 128;
+  std::string reference_path, day, output;
+  if (argc % 2 != 1) throw std::runtime_error("each option requires a value");
   for (int i = 1; i + 1 < argc; i += 2) {
     const std::string k = argv[i], v = argv[i + 1];
     if (k == "--input") input_path = v;
@@ -169,14 +181,34 @@ int main(int argc, char** argv) {
     else if (k == "--work-dir") work_dir = v;
     else if (k == "--workers") workers = std::stoi(v);
     else if (k == "--output-mode") output_mode = v;
+    else if (k == "--ref") reference_path = v;
+    else if (k == "--day") day = v;
+    else if (k == "--out") output = v;
+    else if (k == "--window-batch") window_batch = std::stoi(v);
+    else if (k == "--pending-mib") pending_mib = std::stoi(v);
     else { std::cerr << "unknown arg " << k << "\n"; return 2; }
   }
   if (input_path.empty() || thresh_path.empty() || work_dir.empty() ||
-      workers < 1 || workers > 64 || (output_mode != "blocks" && output_mode != "legacy")) {
-    std::cerr << "usage: --input F --thresh T --work-dir D [--workers N] [--output-mode blocks|legacy]\n";
+      workers < 1 || workers > 64 || window_batch < 1 || window_batch > kNumEndpoints || pending_mib < 1 ||
+      (output_mode != "blocks" && output_mode != "legacy" && output_mode != "stream")) {
+    std::cerr << "usage: --input F --thresh T --work-dir D [--workers N] [--output-mode stream|blocks|legacy] [--ref F --day YYYYMMDD --out F] [--window-batch N] [--pending-mib N]\n";
     return 2;
   }
 
+  const bool streaming = output_mode == "stream";
+#ifdef CMS_RTF_HAS_ARROW
+  std::unique_ptr<aggregation::Reference> reference;
+  std::unique_ptr<aggregation::ArrowOutput> arrow;
+  aggregation::RollingFinalizer finalizer;
+  if (streaming) {
+    if (reference_path.empty() || day.empty() || output.empty())
+      throw std::runtime_error("stream output requires --ref, --day and --out");
+    reference = std::make_unique<aggregation::Reference>(aggregation::ReadReference(reference_path));
+    arrow = std::make_unique<aggregation::ArrowOutput>(output, aggregation::DayStart(day));
+  }
+#else
+  if (streaming) throw std::runtime_error("rebuild with CMS_RTF_BUILD_AGGREGATE=ON for stream output");
+#endif
   std::unordered_map<int32_t, Thresh> thresh;
   {
     std::ifstream in(thresh_path, std::ios::binary);
@@ -193,6 +225,12 @@ int main(int argc, char** argv) {
     }
   }
 
+#ifdef CMS_RTF_HAS_ARROW
+  if (streaming) for (const auto& [symbol, weights] : reference->weights) {
+    (void)weights;
+    if (!thresh.count(symbol)) throw std::runtime_error("reference member missing thresholds");
+  }
+#endif
   if (!std::filesystem::is_directory(work_dir)) {
     std::cerr << "work directory must exist\n"; return 1;
   }
@@ -220,6 +258,14 @@ int main(int argc, char** argv) {
   std::vector<std::unique_ptr<WorkerCtx>> ctxs(workers);
   std::atomic<bool> input_done{false};
   std::atomic<bool> worker_failed{false};
+  std::atomic<int> resumed_target{0};
+  std::mutex barrier_mu;
+  std::condition_variable closed_cv, resumed_cv;
+  auto fail_workers = [&] {
+    { std::lock_guard<std::mutex> lock(barrier_mu); worker_failed.store(true); }
+    closed_cv.notify_all(); resumed_cv.notify_all();
+  };
+  const size_t pending_limit = static_cast<size_t>(pending_mib) * 1024 * 1024 / workers;
   int64_t spin_waits = 0;
   constexpr size_t kBatchSize = 256;
 
@@ -236,6 +282,26 @@ int main(int argc, char** argv) {
         flows = std::make_unique<BlockWriter<FlowRec>>(prefix + ".flow.cmsb");
       }
       auto finish_all = [&]() {
+        if (streaming) {
+          for (auto& [symbol, runner] : ctx->states) {
+            (void)symbol;
+            ctx->sh_identities += runner->sh_order_identities();
+            ctx->identity_capacity += runner->sh_identity_capacity_bytes();
+            ctx->live_orders += runner->live_orders();
+            const auto& h = runner->health();
+            ctx->health.over_deduct += h.over_deduct;
+            ctx->health.d_unknown += h.d_unknown;
+            ctx->health.unknown_trade_ref += h.unknown_trade_ref;
+            ctx->health.late_passive_ref += h.late_passive_ref;
+            ctx->health.agg_skip += h.agg_skip;
+            ctx->health.crossed_book += h.crossed_book;
+            ctx->health.immediate_fill += h.immediate_fill;
+            ctx->nonmono += runner->non_monotonic();
+            delete runner;
+          }
+          ctx->states.clear();
+          return;
+        }
         // Legacy output remains available for byte-for-byte acceptance. Block
         // output has already been written during OnEvent; only tails/index remain.
         std::ofstream book_out, flow_out;
@@ -296,17 +362,37 @@ int main(int argc, char** argv) {
         if (!count) { std::this_thread::yield(); continue; }
         for (size_t k = 0; k < count; ++k) {
           const EventRec& ev = batch[k];
+          if (ev.symbol < 0) {
+            for (auto& [symbol, runner] : ctx->states) {
+              if (ev.symbol == -2) runner->Finish(); else runner->CloseThrough(ev.time_ms);
+              ctx->windows.at(symbol)->seed_mid = runner->seed_mid();
+            }
+            ctx->peak_pending_bytes = std::max(ctx->peak_pending_bytes, ctx->pending_bytes);
+            std::unique_lock<std::mutex> lock(barrier_mu);
+            ctx->closed_target.store(ev.time_ms, std::memory_order_release);
+            closed_cv.notify_one();
+            resumed_cv.wait(lock, [&] { return resumed_target.load() >= ev.time_ms || worker_failed.load(); });
+            continue;
+          }
           auto it = ctx->states.find(ev.symbol);
           if (it == ctx->states.end()) {
             const auto th = thresh.find(ev.symbol);
-            auto& buf = ctx->bufs[ev.symbol];
-            buf.books = books.get(); buf.flows = flows.get();
+            RecordSink* sink;
+            if (streaming) {
+              auto window = std::make_unique<WindowRecords>(&ctx->pending_bytes, pending_limit);
+              sink = window.get();
+              ctx->windows.emplace(ev.symbol, std::move(window));
+            } else {
+              auto& buf = ctx->bufs[ev.symbol];
+              buf.books = books.get(); buf.flows = flows.get();
+              sink = &buf;
+            }
             it = ctx->states
                      .emplace(ev.symbol,
                               new SymbolRunner(ev.symbol,
                                                th != thresh.end() ? th->second.xl : 0.0,
                                                th != thresh.end() ? th->second.m : 0.0,
-                                               grid, &buf))
+                                               grid, sink))
                      .first;
           }
           it->second->OnEvent(ev);
@@ -316,7 +402,7 @@ int main(int argc, char** argv) {
       if (!worker_failed.load()) finish_all();
       } catch (...) {
         ctx->error = std::current_exception();
-        worker_failed.store(true);
+        fail_workers();
       }
     });
     ctxs[i] = std::move(ctx);
@@ -335,11 +421,84 @@ int main(int argc, char** argv) {
     }
     pending_size[i] = 0;
   };
+  int emitted = 0;
+  double merge_seconds = 0;
+  auto close_windows = [&](int end, bool eof) {
+    if (end <= emitted || worker_failed.load()) return;
+    for (int i = 0; i < workers; ++i) {
+      flush(i);
+      EventRec marker{};
+      marker.symbol = eof ? -2 : -1;
+      marker.time_ms = end;
+      while (!ctxs[i]->ring.push_batch(&marker, 1) && !worker_failed.load()) std::this_thread::yield();
+    }
+    {
+      std::unique_lock<std::mutex> lock(barrier_mu);
+      closed_cv.wait(lock, [&] {
+        if (worker_failed.load()) return true;
+        for (auto& ctx : ctxs) if (ctx->closed_target.load() < end) return false;
+        return true;
+      });
+    }
+    if (worker_failed.load()) return;
+#ifdef CMS_RTF_HAS_ARROW
+    const auto merge_started = std::chrono::steady_clock::now();
+    struct Member { const std::array<double, 4>* weights; WindowRecords* records; };
+    std::vector<Member> members;
+    for (const auto& [symbol, weights] : reference->weights) {
+      auto& windows = ctxs[dispatch[symbol]]->windows;
+      const auto found = windows.find(symbol);
+      if (found != windows.end()) members.push_back({&weights, found->second.get()});
+    }
+    for (int e = emitted; e < end; ++e) {
+      std::array<aggregation::Endpoint, 4> acc{};
+      for (const auto& member : members) {
+        auto& r = *member.records;
+        while (r.book_pos < r.books.size() && r.books[r.book_pos].ep_ms <= grid[e]) {
+          r.current = r.books[r.book_pos++]; r.has_current = true;
+        }
+        const BookRec* book = r.has_current ? &r.current : nullptr;
+        const double mid = book ? book->mid : std::numeric_limits<double>::quiet_NaN();
+        if (e == 0) r.previous_mid = r.seed_mid;
+        double ret = std::numeric_limits<double>::quiet_NaN();
+        if (std::isfinite(mid) && std::isfinite(r.previous_mid))
+          ret = mid == r.previous_mid && mid > 0 ? 0.0 : std::log(mid) - std::log(r.previous_mid);
+        r.previous_mid = mid;
+        for (int idx = 0; idx < 4; ++idx) {
+          const double w = (*member.weights)[idx];
+          if (w > 0) aggregation::AddBookValue(book, ret, grid[e], w, acc[idx]);
+        }
+        while (r.flow_pos < r.flows.size() && r.flows[r.flow_pos].ep_ms <= grid[e]) {
+          const auto& flow = r.flows[r.flow_pos++];
+          if (flow.ep_ms != grid[e]) throw std::runtime_error("flow behind emitted window");
+          for (int idx = 0; idx < 4; ++idx) {
+            const double w = (*member.weights)[idx];
+            if (w > 0) aggregation::AddFlowValue(flow, w, acc[idx]);
+          }
+        }
+      }
+      arrow->Append(grid[e], finalizer.Publish(e, acc, *reference));
+    }
+    // Flush to the single final-format Arrow stream even while stdin stays open.
+    arrow->Flush();
+    for (auto& ctx : ctxs) for (auto& [symbol, window] : ctx->windows) {
+      (void)symbol; window->Consumed();
+    }
+    merge_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - merge_started).count();
+#endif
+    emitted = end;
+    { std::lock_guard<std::mutex> lock(barrier_mu); resumed_target.store(end, std::memory_order_release); }
+    resumed_cv.notify_all();
+  };
+  std::vector<int32_t> channel_time(2 * 65536, -1);
+  std::vector<int> channels;
+  std::string input_failure;
   std::vector<DtypeRow> rows(1 << 16);
   int64_t n_events = 0, input_rows = 0;
   size_t carry = has_magic ? 0 : prefix_size;
   if (carry) std::memcpy(rows.data(), prefix.data(), carry);
   bool input_error = false;
+  try {
   while (!worker_failed.load(std::memory_order_relaxed)) {
     ssize_t received;
     do {
@@ -356,7 +515,16 @@ int main(int argc, char** argv) {
       if (sym < 0 || sym >= static_cast<int32_t>(dispatch.size())) continue;
       const int worker = dispatch[sym];
       if (worker < 0) continue;
-      pending[worker][pending_size[worker]++] = map_row(rows[j], sym);
+      const EventRec ev = map_row(rows[j], sym);
+      if (streaming) {
+        if (emitted && ev.time_ms <= grid[emitted - 1])
+          throw std::runtime_error("late event behind published watermark: symbol=" + std::to_string(sym) +
+            " event_ms=" + std::to_string(ev.time_ms) + " closed_ms=" + std::to_string(grid[emitted - 1]));
+        const int channel = (IsSh(sym) ? 65536 : 0) + static_cast<uint16_t>(ev.channel);
+        if (channel_time[channel] < 0) channels.push_back(channel);
+        channel_time[channel] = std::max(channel_time[channel], ev.time_ms);
+      }
+      pending[worker][pending_size[worker]++] = ev;
       if (pending_size[worker] == kBatchSize) flush(worker);
       ++n_events;
     }
@@ -365,6 +533,18 @@ int main(int argc, char** argv) {
     if (carry) std::memmove(rows.data(), reinterpret_cast<char*>(rows.data()) +
                             got * sizeof(DtypeRow), carry);
     if (!bytes) { input_error = std::ferror(in) || carry != 0; break; }
+    if (streaming && !channels.empty()) {
+      int32_t watermark = kPmCloseMs + 1;
+      for (const auto channel : channels) watermark = std::min(watermark, channel_time[channel]);
+      const int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
+      if (end - emitted >= window_batch) close_windows(end, false);
+    }
+  }
+  if (input_error) fail_workers();
+  if (streaming && !input_error) close_windows(kNumEndpoints, true);
+  } catch (const std::exception& e) {
+    input_failure = e.what();
+    fail_workers();
   }
   if (in != stdin) std::fclose(in);
   const auto dispatched = std::chrono::steady_clock::now();
@@ -388,6 +568,8 @@ int main(int argc, char** argv) {
     identity_capacity += ctx->identity_capacity;
     live_orders += ctx->live_orders;
   }
+  if (!input_failure.empty()) std::cerr << input_failure << "\n";
+  if (input_error) std::cerr << "truncated or unreadable DTYPE stream\n";
   if (worker_failed.load()) {
     for (auto& ctx : ctxs) if (ctx->error) {
       try { std::rethrow_exception(ctx->error); }
@@ -396,12 +578,17 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (input_error) { std::cerr << "truncated or unreadable DTYPE stream\n"; return 1; }
+#ifdef CMS_RTF_HAS_ARROW
+  if (streaming) arrow->Commit();
+#endif
+  size_t pending_peak = 0;
+  for (const auto& ctx : ctxs) pending_peak += ctx->peak_pending_bytes;
   const auto finished = std::chrono::steady_clock::now();
   const double dispatch_s = std::chrono::duration<double>(dispatched - started).count();
   const double total_s = std::chrono::duration<double>(finished - started).count();
   struct rusage usage{};
   getrusage(RUSAGE_SELF, &usage);
-  std::printf("{\"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
+  std::printf("{\"emitted_endpoints\": %d, \"merge_seconds\": %.6f, \"peak_pending_payload_bytes\": %zu, \"output_mode\": \"%s\", \"peak_rss_kib\": %ld, "
               "\"output_capacity_at_eof_bytes\": %" PRIu64 ", \"sh_identities_at_eof\": %" PRIu64 ", "
               "\"sh_identity_capacity_at_eof_bytes\": %" PRIu64 ", \"live_orders_at_eof\": %" PRIu64 ", "
               "\"input_rows\": %" PRId64 ", \"dispatch_seconds\": %.6f, "
@@ -410,9 +597,14 @@ int main(int argc, char** argv) {
               ", \"unknown_trade_ref\": %" PRId64 ", \"late_passive_ref\": %" PRId64
               ", \"agg_skip\": %" PRId64 ", \"crossed_book\": %" PRId64
               ", \"immediate_fill\": %" PRId64 ", \"sz_non_monotonic\": %" PRId64 "}\n",
-              output_mode.c_str(), usage.ru_maxrss, output_capacity, sh_identities, identity_capacity, live_orders,
+              emitted, merge_seconds, pending_peak, output_mode.c_str(), usage.ru_maxrss, output_capacity, sh_identities, identity_capacity, live_orders,
               input_rows, dispatch_s, total_s, n_events, workers, spin_waits, total.over_deduct, total.d_unknown,
               total.unknown_trade_ref, total.late_passive_ref, total.agg_skip,
               total.crossed_book, total.immediate_fill, nonmono);
   return 0;
+}
+
+int main(int argc, char** argv) {
+  try { return Run(argc, argv); }
+  catch (const std::exception& e) { std::cerr << "cms_index500ms_mt: " << e.what() << '\n'; return 1; }
 }
