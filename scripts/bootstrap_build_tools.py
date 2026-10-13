@@ -17,7 +17,7 @@ import urllib.request
 
 PACKAGES = ['gcc-13-x86-64-linux-gnu', 'g++-13-x86-64-linux-gnu', 'cpp-13-x86-64-linux-gnu',
             'libgcc-13-dev', 'libstdc++-13-dev', 'libc6-dev', 'linux-libc-dev',
-            'binutils-x86-64-linux-gnu', 'binutils-common', 'libbinutils',
+            'binutils', 'binutils-x86-64-linux-gnu', 'binutils-common', 'libbinutils',
             'cmake', 'cmake-data', 'make', 'libmpc3', 'libisl23', 'libcc1-0',
             'libgomp1', 'libjsoncpp25', 'librhash0', 'libuv1t64', 'libarchive13t64',
             'libstdc++6', 'libgcc-s1', 'libsframe1', 'libctf0', 'libctf-nobfd0']

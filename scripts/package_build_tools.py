@@ -17,7 +17,7 @@ import tarfile
 
 PACKAGES = ['gcc-13-x86-64-linux-gnu', 'g++-13-x86-64-linux-gnu',
             'cpp-13-x86-64-linux-gnu', 'libgcc-13-dev', 'libstdc++-13-dev',
-            'libc6-dev', 'linux-libc-dev', 'binutils-x86-64-linux-gnu',
+            'libc6-dev', 'linux-libc-dev', 'binutils', 'binutils-x86-64-linux-gnu',
             'binutils-common', 'libbinutils', 'cmake', 'cmake-data', 'make']
 GLIBC = re.compile(r'^(libc\.so|libm\.so|libmvec\.so|libpthread\.so|libdl\.so|librt\.so|libresolv\.so|ld-linux)')
 
