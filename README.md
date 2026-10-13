@@ -40,6 +40,8 @@ C++ 与 Python 之间用二进制文件接口（`events.bin`/`book.bin`/`flow.bi
 聚合默认使用 C++。构建需要 Arrow C++，也可直接使用现有 PyArrow 安装内的头文件和
 动态库；CMake 会自动发现。多 Python 环境可指定 `-DPython3_EXECUTABLE=/path/to/python`。
 仅构建逐笔内核可用 `-DCMS_RTF_BUILD_AGGREGATE=OFF`，运行时需显式选 Python 聚合。
+gy_dev 当前 PyArrow 11 使用旧 libstdc++ ABI，配置时另加
+`-DCMAKE_CXX_FLAGS=-D_GLIBCXX_USE_CXX11_ABI=0`；否则 Arrow 的字符串符号无法链接。
 
 ```bash
 cmake -S . -B build && cmake --build build -j

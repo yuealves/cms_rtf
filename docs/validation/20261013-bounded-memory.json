@@ -1,0 +1,362 @@
+{
+  "local_prefix": {
+    "host": "linwei-pc",
+    "platform": "Linux-6.18.40.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+    "input": "/home/linwei/Code/quant/zs_l2/cms_rtf/work/perf-20261013/local_0935/stream.bin",
+    "input_bytes": 5154732808,
+    "workers": 16,
+    "passed": true,
+    "runs": [
+      {
+        "variant": "baseline",
+        "repeat": 0,
+        "kernel_seconds": 6.264293693999207,
+        "aggregate_seconds": 3.265161816998443,
+        "total_seconds": 9.52945551099765,
+        "kernel_peak_rss_kib": 1600996,
+        "aggregate_peak_rss_kib": 174116,
+        "kernel_summary": {
+          "input_rows": 40271350,
+          "dispatch_seconds": 2.880713,
+          "total_seconds": 6.247229,
+          "events": 17892045,
+          "workers": 16,
+          "spin_waits": 0,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 2950757,
+          "immediate_fill": 2925774,
+          "sz_non_monotonic": 0
+        }
+      },
+      {
+        "variant": "bounded",
+        "repeat": 0,
+        "kernel_seconds": 1.252731792999839,
+        "aggregate_seconds": 1.7164928019992658,
+        "total_seconds": 2.9692245949991047,
+        "kernel_peak_rss_kib": 936964,
+        "aggregate_peak_rss_kib": 163268,
+        "kernel_summary": {
+          "output_mode": "blocks",
+          "peak_rss_kib": 936964,
+          "output_capacity_at_eof_bytes": 419315712,
+          "sh_identities_at_eof": 5541819,
+          "sh_identity_capacity_at_eof_bytes": 244252448,
+          "live_orders_at_eof": 2500044,
+          "input_rows": 40271350,
+          "dispatch_seconds": 1.151036,
+          "total_seconds": 1.235534,
+          "events": 17892045,
+          "workers": 16,
+          "spin_waits": 0,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 2950757,
+          "immediate_fill": 2925774,
+          "sz_non_monotonic": 0
+        }
+      }
+    ],
+    "checks": [
+      {
+        "variant": "baseline",
+        "repeat": 0,
+        "payload_equal": true,
+        "health_equal": true,
+        "rows": 115200,
+        "keys_equal": true,
+        "keys_unique": true,
+        "exact_columns": 106,
+        "total_columns": 106
+      },
+      {
+        "variant": "bounded",
+        "repeat": 0,
+        "payload_equal": true,
+        "health_equal": true,
+        "rows": 115200,
+        "keys_equal": true,
+        "keys_unique": true,
+        "exact_columns": 106,
+        "total_columns": 106
+      }
+    ],
+    "reference_check": {
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    }
+  },
+  "gy_dev_full_day": {
+    "host": "r7525",
+    "platform": "Linux-5.15.0-191-generic-x86_64-with-glibc2.35",
+    "input": "/tmp/par_t8.bin",
+    "input_bytes": 68570400648,
+    "workers": 16,
+    "passed": true,
+    "baseline_commit": "36c86da0998b569ab871d6a031065a2e39d0b759",
+    "optimized_commit": "880eff2",
+    "report": "/data/users/linwei/cms_work/memory_20261013/full16-locality/report.json",
+    "compiler": "GCC 11.4.0",
+    "cxx_flags": "-O3 -DNDEBUG -D_GLIBCXX_USE_CXX11_ABI=0; aggregate -ffp-contract=off",
+    "pyarrow_version": "11.0.0",
+    "units": "seconds and KiB unless explicitly named bytes",
+    "exporter_running": false,
+    "runs": [
+      {
+        "variant": "baseline",
+        "repeat": 0,
+        "kernel_seconds": 59.916222512954846,
+        "aggregate_seconds": 12.766131629003212,
+        "total_seconds": 72.68235414195806,
+        "kernel_peak_rss_kib": 23989880,
+        "aggregate_peak_rss_kib": 213080,
+        "peak_rss_sample": {
+          "seconds": 54.093800152884796,
+          "pid": 2948064,
+          "VmRSS": 23897160,
+          "VmHWM": 23897160,
+          "RssAnon": 23893536,
+          "RssFile": 3624,
+          "RssShmem": 0
+        },
+        "kernel_summary": {
+          "input_rows": 535706255,
+          "dispatch_seconds": 54.108994,
+          "total_seconds": 59.855715,
+          "events": 227956156,
+          "workers": 16,
+          "spin_waits": 5753259,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 40687629,
+          "immediate_fill": 40653660,
+          "sz_non_monotonic": 0
+        },
+        "aggregate_summary": {
+          "rows": 115200,
+          "book_records": 51724800,
+          "flow_records": 32750363,
+          "book_seconds": 8.3541,
+          "flow_seconds": 4.06345,
+          "finalize_seconds": 0.0580817,
+          "arrow_seconds": 0.193748,
+          "total_seconds": 12.7076
+        },
+        "output_file_bytes": 20247029440
+      },
+      {
+        "variant": "bounded",
+        "repeat": 0,
+        "kernel_seconds": 60.20912543311715,
+        "aggregate_seconds": 10.11515739094466,
+        "total_seconds": 70.32428282406181,
+        "kernel_peak_rss_kib": 3626644,
+        "aggregate_peak_rss_kib": 192292,
+        "peak_rss_sample": {
+          "seconds": 59.594776686048135,
+          "pid": 2972328,
+          "VmRSS": 3622332,
+          "VmHWM": 3622332,
+          "RssAnon": 3618624,
+          "RssFile": 3708,
+          "RssShmem": 0
+        },
+        "kernel_summary": {
+          "output_mode": "blocks",
+          "peak_rss_kib": 3626644,
+          "output_capacity_at_eof_bytes": 419315712,
+          "sh_identities_at_eof": 64886586,
+          "sh_identity_capacity_at_eof_bytes": 2840256512,
+          "live_orders_at_eof": 4172008,
+          "input_rows": 535706255,
+          "dispatch_seconds": 59.630643,
+          "total_seconds": 60.169177,
+          "events": 227956156,
+          "workers": 16,
+          "spin_waits": 7268374,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 40687629,
+          "immediate_fill": 40653660,
+          "sz_non_monotonic": 0
+        },
+        "aggregate_summary": {
+          "rows": 115200,
+          "book_records": 32750363,
+          "flow_records": 32750363,
+          "book_seconds": 5.84406,
+          "flow_seconds": 3.93027,
+          "finalize_seconds": 0.0533739,
+          "arrow_seconds": 0.198047,
+          "total_seconds": 10.0636
+        },
+        "output_file_bytes": 14936264264
+      },
+      {
+        "variant": "bounded",
+        "repeat": 1,
+        "kernel_seconds": 57.87613223004155,
+        "aggregate_seconds": 9.916018544929102,
+        "total_seconds": 67.79215077497065,
+        "kernel_peak_rss_kib": 3625584,
+        "aggregate_peak_rss_kib": 190480,
+        "peak_rss_sample": {
+          "seconds": 57.34401990589686,
+          "pid": 2996191,
+          "VmRSS": 3620972,
+          "VmHWM": 3620972,
+          "RssAnon": 3617336,
+          "RssFile": 3636,
+          "RssShmem": 0
+        },
+        "kernel_summary": {
+          "output_mode": "blocks",
+          "peak_rss_kib": 3625584,
+          "output_capacity_at_eof_bytes": 419315712,
+          "sh_identities_at_eof": 64886586,
+          "sh_identity_capacity_at_eof_bytes": 2840256512,
+          "live_orders_at_eof": 4172008,
+          "input_rows": 535706255,
+          "dispatch_seconds": 57.381648,
+          "total_seconds": 57.854738,
+          "events": 227956156,
+          "workers": 16,
+          "spin_waits": 6816157,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 40687629,
+          "immediate_fill": 40653660,
+          "sz_non_monotonic": 0
+        },
+        "aggregate_summary": {
+          "rows": 115200,
+          "book_records": 32750363,
+          "flow_records": 32750363,
+          "book_seconds": 5.77067,
+          "flow_seconds": 3.77878,
+          "finalize_seconds": 0.0531928,
+          "arrow_seconds": 0.203844,
+          "total_seconds": 9.8427
+        },
+        "output_file_bytes": 14936264264
+      },
+      {
+        "variant": "baseline",
+        "repeat": 1,
+        "kernel_seconds": 54.703074503922835,
+        "aggregate_seconds": 12.415803697193041,
+        "total_seconds": 67.11887820111588,
+        "kernel_peak_rss_kib": 24013624,
+        "aggregate_peak_rss_kib": 203100,
+        "peak_rss_sample": {
+          "seconds": 48.32926421589218,
+          "pid": 3018238,
+          "VmRSS": 23899092,
+          "VmHWM": 23899092,
+          "RssAnon": 23895452,
+          "RssFile": 3640,
+          "RssShmem": 0
+        },
+        "kernel_summary": {
+          "input_rows": 535706255,
+          "dispatch_seconds": 48.373064,
+          "total_seconds": 54.665993,
+          "events": 227956156,
+          "workers": 16,
+          "spin_waits": 4558107,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 40687629,
+          "immediate_fill": 40653660,
+          "sz_non_monotonic": 0
+        },
+        "aggregate_summary": {
+          "rows": 115200,
+          "book_records": 51724800,
+          "flow_records": 32750363,
+          "book_seconds": 7.96674,
+          "flow_seconds": 4.13109,
+          "finalize_seconds": 0.0572388,
+          "arrow_seconds": 0.180727,
+          "total_seconds": 12.3737
+        },
+        "output_file_bytes": 20247029440
+      }
+    ],
+    "checks": [
+      {
+        "variant": "baseline",
+        "repeat": 0,
+        "payload_equal": true,
+        "health_equal": true,
+        "rows": 115200,
+        "keys_equal": true,
+        "keys_unique": true,
+        "exact_columns": 106,
+        "total_columns": 106
+      },
+      {
+        "variant": "bounded",
+        "repeat": 0,
+        "payload_equal": true,
+        "health_equal": true,
+        "rows": 115200,
+        "keys_equal": true,
+        "keys_unique": true,
+        "exact_columns": 106,
+        "total_columns": 106
+      },
+      {
+        "variant": "bounded",
+        "repeat": 1,
+        "payload_equal": true,
+        "health_equal": true,
+        "rows": 115200,
+        "keys_equal": true,
+        "keys_unique": true,
+        "exact_columns": 106,
+        "total_columns": 106
+      },
+      {
+        "variant": "baseline",
+        "repeat": 1,
+        "payload_equal": true,
+        "health_equal": true,
+        "rows": 115200,
+        "keys_equal": true,
+        "keys_unique": true,
+        "exact_columns": 106,
+        "total_columns": 106
+      }
+    ],
+    "reference_check": {
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    }
+  }
+}
