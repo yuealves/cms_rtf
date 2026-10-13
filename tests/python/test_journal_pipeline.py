@@ -79,6 +79,23 @@ class PipelineTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'exporter=7'):
             run_pipeline(exporter, cmd, self.root, os.environ.copy())
 
+    def test_truncated_thresholds_rejected(self):
+        (self.root / 'thresh').write_bytes(b'incomplete')
+        result = subprocess.run(self.command(self.root / 'out') + ['--input', '-'],
+                                input=self.data, capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'truncated thresholds', result.stderr)
+
+    @unittest.skipUnless(Path('/dev/full').exists(), 'requires Linux /dev/full')
+    def test_output_write_failure_is_not_success(self):
+        dest = self.root / 'out'
+        cmd = self.command(dest)
+        (dest / 'w0.book.bin').symlink_to('/dev/full')
+        result = subprocess.run(cmd + ['--input', '-'], input=self.data,
+                                capture_output=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'worker failed', result.stderr)
+
     def test_consumer_failure_does_not_hang_producer(self):
         exporter = [sys.executable, '-c', 'import sys;sys.stdout.buffer.write(bytes(1048576))']
         consumer = [sys.executable, '-c', 'import sys;sys.exit(3)']
