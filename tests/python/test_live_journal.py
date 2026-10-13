@@ -331,9 +331,9 @@ class LiveJournalTest(unittest.TestCase):
 
     def paced_replay(self, dest, start, stop, speed, drain):
         cmd = [str(self.kernel.with_name('cms_journal_replayer')), '--source', str(self.writer.directory),
-               '--dest', str(dest), '--pace-from-ns', str(start), '--until-ns', str(stop),
+               '--dest', str(dest.relative_to(self.root)), '--pace-from-ns', str(start), '--until-ns', str(stop),
                '--speed', str(speed), '--wait-ready']
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(cmd, cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
             ready = json.loads(proc.stdout.readline())
             drain(ready['ready_records'])

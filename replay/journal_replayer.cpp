@@ -66,7 +66,7 @@ int main(int argc, char** argv) try {
   }
   Require(!source.empty() && !dest.empty() && std::isfinite(speed) && speed > 0 && start > 0 && stop > start,
           "usage: cms_journal_replayer --source DIR --dest NEW_DIR --speed N --pace-from-ns NS --until-ns NS [--wait-ready]");
-  source = fs::canonical(source); dest = fs::weakly_canonical(dest);
+  source = fs::canonical(source); dest = fs::weakly_canonical(fs::absolute(dest));
   for (auto p = dest; !p.empty(); p = p.parent_path()) {
     Require(p != source, "destination must be separate from original journal");
     if (p == p.parent_path()) break;
