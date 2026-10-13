@@ -38,7 +38,7 @@ class RollingFinalizer {
 // Commit atomically publishes it only after the whole input has succeeded.
 class ArrowOutput {
  public:
-  ArrowOutput(const std::string& path, int64_t day0);
+  ArrowOutput(const std::string& path, int64_t day0, bool live = false);
   ~ArrowOutput();
   void Append(int32_t ep, const WindowRows& rows);
   void Flush();

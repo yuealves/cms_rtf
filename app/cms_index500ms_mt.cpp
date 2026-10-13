@@ -39,23 +39,18 @@
 #include <condition_variable>
 #include <mutex>
 #include <poll.h>
+#include <csignal>
+#include "cms_rtf/dtype_row.h"
+#include "cms_rtf/journal_input.h"
 
 namespace {
 
 using namespace cms_rtf;
+volatile std::sig_atomic_t stopping = 0;
+void Stop(int) { stopping = 1; }
 
 // 与 cms_market_gateway/tools/archive_journal.py 的 DTYPE / cms_rtf journal_events
 // JOURNAL_DTYPE 逐字节一致（128B）
-struct DtypeRow {
-  int64_t nano_timestamp, recv_ns, exchange_ns;
-  uint64_t epoch, record_seq, recv_seq, business_seq, buy_ref, sell_ref,
-      exchange_time_raw, quantity_raw, value_raw;
-  uint32_t price_raw, feed_seq, trading_day, event_index;
-  uint16_t channel;
-  uint8_t market, message_type, action_code, side_raw, record_flags, _pad;
-  char symbol[8];
-};
-static_assert(sizeof(DtypeRow) == 128, "DTYPE row layout changed");
 
 inline int32_t parse_symbol(const char* s) {
   if (s[6] == 0) {
@@ -175,6 +170,8 @@ int Run(int argc, char** argv) {
   std::string output_mode = "blocks";
   int workers = 8, window_batch = 64, pending_mib = 256;
   std::string reference_path, day, output;
+  std::string journal_path, journal_mode = "follow", journal_clock = "wall";
+  bool batch_specified = false;
   if (argc % 2 != 1) throw std::runtime_error("each option requires a value");
   for (int i = 1; i + 1 < argc; i += 2) {
     const std::string k = argv[i], v = argv[i + 1];
@@ -186,11 +183,21 @@ int Run(int argc, char** argv) {
     else if (k == "--ref") reference_path = v;
     else if (k == "--day") day = v;
     else if (k == "--out") output = v;
-    else if (k == "--window-batch") window_batch = std::stoi(v);
+    else if (k == "--window-batch") { window_batch = std::stoi(v); batch_specified = true; }
     else if (k == "--pending-mib") pending_mib = std::stoi(v);
+    else if (k == "--journal") journal_path = v;
+    else if (k == "--journal-mode") journal_mode = v;
+    else if (k == "--journal-clock") journal_clock = v;
     else { std::cerr << "unknown arg " << k << "\n"; return 2; }
   }
-  if (input_path.empty() || thresh_path.empty() || work_dir.empty() ||
+  const bool journal_input = !journal_path.empty();
+  const bool follow = journal_input && journal_mode == "follow";
+  if (journal_input && !batch_specified) window_batch = 1;
+  if (journal_mode != "follow" && journal_mode != "replay") throw std::runtime_error("invalid journal-mode");
+  if (journal_clock != "source" && journal_clock != "wall") throw std::runtime_error("invalid journal-clock");
+  if (journal_input && (!input_path.empty() || output_mode != "stream" || window_batch != 1))
+    throw std::runtime_error("journal requires stream output, window-batch 1 and no --input");
+  if ((!journal_input && input_path.empty()) || thresh_path.empty() || work_dir.empty() ||
       workers < 1 || workers > 64 || window_batch < 1 || window_batch > kNumEndpoints || pending_mib < 1 ||
       (output_mode != "blocks" && output_mode != "legacy" && output_mode != "stream")) {
     std::cerr << "usage: --input F --thresh T --work-dir D [--workers N] [--output-mode stream|blocks|legacy] [--ref F --day YYYYMMDD --out F] [--window-batch N] [--pending-mib N]\n";
@@ -206,7 +213,7 @@ int Run(int argc, char** argv) {
     if (reference_path.empty() || day.empty() || output.empty())
       throw std::runtime_error("stream output requires --ref, --day and --out");
     reference = std::make_unique<aggregation::Reference>(aggregation::ReadReference(reference_path));
-    arrow = std::make_unique<aggregation::ArrowOutput>(output, aggregation::DayStart(day));
+    arrow = std::make_unique<aggregation::ArrowOutput>(output, aggregation::DayStart(day), follow);
   }
 #else
   if (streaming) throw std::runtime_error("rebuild with CMS_RTF_BUILD_AGGREGATE=ON for stream output");
@@ -236,17 +243,27 @@ int Run(int argc, char** argv) {
   if (!std::filesystem::is_directory(work_dir)) {
     std::cerr << "work directory must exist\n"; return 1;
   }
-  FILE* in = input_path == "-" ? stdin : std::fopen(input_path.c_str(), "rb");
-  if (!in) { std::cerr << "cannot open " << input_path << "\n"; return 1; }
+  FILE* in = journal_input ? nullptr : (input_path == "-" ? stdin : std::fopen(input_path.c_str(), "rb"));
+  if (!journal_input && !in) { std::cerr << "cannot open " << input_path << "\n"; return 1; }
   // Avoid stdio reading ahead into records while parsing the header. The event
   // loop uses read(2), which returns available pipe bytes without waiting for an
   // entire 8 MiB batch (important for a continuously running journal producer).
-  std::setvbuf(in, nullptr, _IONBF, 0);
+  if (in) std::setvbuf(in, nullptr, _IONBF, 0);
   std::array<char, 8> prefix{};
-  const size_t prefix_size = std::fread(prefix.data(), 1, prefix.size(), in);
+  const size_t prefix_size = in ? std::fread(prefix.data(), 1, prefix.size(), in) : 0;
   const bool has_magic = prefix_size == 8 && std::memcmp(prefix.data(), "CMSPQ01\0", 8) == 0;
   if (input_path == "-" && !has_magic) {
     std::cerr << "stdin requires CMSPQ01 header\n"; return 1;
+  }
+  std::unique_ptr<JournalInput> journal;
+  int64_t journal_day0_ns = 0;
+  if (journal_input) {
+#ifdef CMS_RTF_HAS_ARROW
+    // Arrow stores Beijing wall time without a timezone; journal clocks are UTC.
+    journal_day0_ns = (aggregation::DayStart(day) - 8LL * 3600 * 1000000) * 1000;
+#endif
+    journal = std::make_unique<JournalInput>(journal_path, std::stoul(day), follow);
+    std::signal(SIGINT, Stop); std::signal(SIGTERM, Stop);
   }
   std::vector<int8_t> dispatch(1000000, -1);
   for (const auto& item : thresh) {
@@ -411,6 +428,7 @@ int Run(int argc, char** argv) {
                                                th != thresh.end() ? th->second.m : 0.0,
                                                grid, sink))
                      .first;
+            if (journal_input) it->second->EnableLive(ctx->closed_target.load(std::memory_order_relaxed));
           }
           it->second->OnEvent(ev);
           ++ctx->events;
@@ -514,44 +532,118 @@ int Run(int argc, char** argv) {
   std::vector<int32_t> channel_time(2 * 65536, -1);
   std::vector<int> channels;
   std::string input_failure;
-  std::vector<DtypeRow> rows(1 << 16);
-  int64_t n_events = 0, input_rows = 0;
+  std::vector<DtypeRow> rows(journal_input ? 4096 : (1 << 16));
+  int64_t n_events = 0, input_rows = 0, late_events = 0;
   size_t carry = has_magic ? 0 : prefix_size;
   if (carry) std::memcpy(rows.data(), prefix.data(), carry);
   bool input_error = false;
+  bool reader_caught_up = false;
+  int64_t source_clock_ns = 0, next_clock_poll_ns = 0;
+  int32_t clock_ms = -1;
+  auto last_status = std::chrono::steady_clock::time_point{};
+  auto write_status = [&](const char* state, bool force = false) {
+    if (!journal) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now - last_status < std::chrono::seconds(1)) return;
+    last_status = now;
+    const auto& js = journal->stats();
+    const auto path = std::filesystem::path(work_dir) / "live-status.json";
+    const auto tmp = path.string() + ".tmp";
+    std::ofstream out(tmp);
+    out.exceptions(std::ios::badbit | std::ios::failbit);
+    struct rusage usage{}; getrusage(RUSAGE_SELF, &usage);
+    std::error_code ignored;
+    const auto bytes = std::filesystem::file_size(output, ignored);
+    out << "{\"status\":\"" << state << "\",\"day\":\"" << day
+        << "\",\"pid\":" << getpid() << ",\"emitted_endpoints\":" << emitted
+        << ",\"last_endpoint_ms\":" << (emitted ? grid[emitted - 1] : -1)
+        << ",\"clock_ms\":" << clock_ms << ",\"source_clock_ns\":" << source_clock_ns
+        << ",\"records\":" << js.records << ",\"input_rows\":" << input_rows
+        << ",\"constituent_events\":" << n_events << ",\"late_events\":" << late_events
+        << ",\"sessions\":" << js.sessions << ",\"unclean_restarts\":" << js.unclean_restarts
+        << ",\"input_incomplete\":" << ((js.incomplete_records || js.sessions > 1) ? "true" : "false")
+        << ",\"journal_ended\":" << (js.ended ? "true" : "false")
+        << ",\"clock_inversions\":" << js.clock_inversions << ",\"page\":" << js.page
+        << ",\"caught_up\":" << (reader_caught_up ? "true" : "false")
+        << ",\"peak_rss_kib\":" << usage.ru_maxrss
+        << ",\"arrow_bytes\":" << (ignored ? 0 : bytes)
+        << ",\"full_grid\":" << (emitted == kNumEndpoints ? "true" : "false") << "}\n";
+    out.close(); std::filesystem::rename(tmp, path);
+  };
+  auto advance_clock = [&](int64_t ns, bool force = false) {
+    if (ns < journal_day0_ns || ns >= journal_day0_ns + 86400000000000LL)
+      throw std::runtime_error("journal source clock is outside its trading day");
+    source_clock_ns = std::max(source_clock_ns, ns);
+    if (!force && source_clock_ns < next_clock_poll_ns) return;
+    next_clock_poll_ns = (source_clock_ns / 500000000 + 1) * 500000000;
+    clock_ms = static_cast<int32_t>((source_clock_ns - journal_day0_ns) / 1000000);
+    int32_t watermark = -1;
+    if (!channels.empty()) {
+      watermark = kPmCloseMs + 1;
+      for (const int c : channels) watermark = std::min(watermark, channel_time[c]);
+    }
+    int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
+    // Retain CMS closing batches until the explicit Huatai +60s session timer.
+    // Source time drives replay; idle wall time is permitted only after the
+    // reader has drained all currently committed frames in follow mode.
+    if ((watermark >= kAmCloseMs && watermark <= kPmOpenMs) || watermark >= kPmCloseMs)
+      end = emitted;
+    if (clock_ms >= kAmCloseMs + 60000) end = std::max(end, kNumEndpoints / 2);
+    if (clock_ms >= kPmCloseMs + 60000) end = kNumEndpoints;
+    if (end > emitted) close_windows(end, false);
+  };
   try {
-  while (!worker_failed.load(std::memory_order_relaxed)) {
-    if (streaming && input_path == "-") {
-      // A worker can reject a stalled watermark while its upstream producer is
-      // idle. Do not leave the consumer stuck in read(), hiding that failure.
+  write_status("running", true);
+  while (!worker_failed.load(std::memory_order_relaxed) && !stopping) {
+    if (!journal_input && streaming && input_path == "-") {
       pollfd descriptor{fileno(in), POLLIN, 0};
       const int ready = ::poll(&descriptor, 1, 100);
       if (ready < 0 && errno != EINTR) { input_error = true; break; }
       if (ready <= 0) continue;
     }
-    ssize_t received;
+    size_t got = 0, total = 0, bytes = 0;
+    bool eof = false, idle = false;
+    int64_t idle_sample_ns = 0;
     const auto read_started = std::chrono::steady_clock::now();
-    do {
-      received = ::read(fileno(in), reinterpret_cast<char*>(rows.data()) + carry,
-                        rows.size() * sizeof(DtypeRow) - carry);
-    } while (received < 0 && errno == EINTR);
+    if (journal) {
+      while (got < rows.size()) {
+        idle_sample_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        const auto result = journal->Next(rows[got]);
+        if (result == JournalInput::Result::Idle) { idle = true; break; }
+        if (result == JournalInput::Result::Eof) { eof = true; break; }
+        ++got;
+      }
+      reader_caught_up = idle || eof;
+    } else {
+      ssize_t received;
+      do {
+        received = ::read(fileno(in), reinterpret_cast<char*>(rows.data()) + carry,
+                          rows.size() * sizeof(DtypeRow) - carry);
+      } while (received < 0 && errno == EINTR);
+      if (received < 0) { input_error = true; break; }
+      bytes = static_cast<size_t>(received); total = bytes + carry;
+      got = total / sizeof(DtypeRow); input_rows += got;
+    }
     read_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - read_started).count();
-    if (received < 0) { input_error = true; break; }
-    const size_t bytes = static_cast<size_t>(received);
-    const size_t total = bytes + carry;
-    const size_t got = total / sizeof(DtypeRow);
-    input_rows += got;
     const auto map_started = std::chrono::steady_clock::now();
     for (size_t j = 0; j < got; ++j) {
+      if (journal) {
+        advance_clock(rows[j].nano_timestamp);
+        if (!rows[j].action_code) continue;
+        ++input_rows;
+      }
       const int32_t sym = parse_symbol(rows[j].symbol);
       if (sym < 0 || sym >= static_cast<int32_t>(dispatch.size())) continue;
       const int worker = dispatch[sym];
       if (worker < 0) continue;
       const EventRec ev = map_row(rows[j], sym);
       if (streaming) {
-        if (emitted && ev.time_ms <= grid[emitted - 1])
-          throw std::runtime_error("late event behind published watermark: symbol=" + std::to_string(sym) +
+        if (emitted && ev.time_ms <= grid[emitted - 1]) {
+          if (journal) ++late_events;
+          else throw std::runtime_error("late event behind published watermark: symbol=" + std::to_string(sym) +
             " event_ms=" + std::to_string(ev.time_ms) + " closed_ms=" + std::to_string(grid[emitted - 1]));
+        }
         const int channel = (IsSh(sym) ? 65536 : 0) + static_cast<uint16_t>(ev.channel);
         if (channel_time[channel] < 0) channels.push_back(channel);
         channel_time[channel] = std::max(channel_time[channel], ev.time_ms);
@@ -562,30 +654,44 @@ int Run(int argc, char** argv) {
     }
     for (int i = 0; i < workers; ++i) flush(i);
     map_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - map_started).count();
+    if (journal) {
+      if (idle && follow && journal_clock == "wall") {
+        const int64_t wall_day = (idle_sample_ns - journal_day0_ns) / 1000000;
+        if (wall_day >= 0 && wall_day < 86400000) {
+          if (journal->stats().records) advance_clock(idle_sample_ns);
+        }
+        else throw std::runtime_error("follow wall clock must match --day; use journal-mode replay for history");
+        // Gateway normally emits END at 15:30. Do not treat a midday END or an
+        // idle interval as day completion. Stop at 15:31; expose missing END.
+        if (wall_day >= 55860000) {
+          if (journal->stats().records && !journal->stats().ended)
+            throw std::runtime_error("daily stop reached without gateway END");
+          eof = true;
+        }
+      }
+      write_status("running");
+      if (eof) { if (source_clock_ns) advance_clock(source_clock_ns, true); break; }
+      if (idle) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      continue;
+    }
     carry = total % sizeof(DtypeRow);
-    if (carry) std::memmove(rows.data(), reinterpret_cast<char*>(rows.data()) +
-                            got * sizeof(DtypeRow), carry);
+    if (carry) std::memmove(rows.data(), reinterpret_cast<char*>(rows.data()) + got * sizeof(DtypeRow), carry);
     if (!bytes) { input_error = std::ferror(in) || carry != 0; break; }
     if (streaming && !channels.empty()) {
       int32_t watermark = kPmCloseMs + 1;
       for (const auto channel : channels) watermark = std::min(watermark, channel_time[channel]);
       const int end = std::lower_bound(grid.begin(), grid.end(), watermark) - grid.begin();
-      // CMS closing batches can contain another stock's pre-close rows AFTER
-      // every channel has printed a close timestamp. That timestamp is not an
-      // end-of-session marker. Keep this last jump pending until the next
-      // session (AM) or validated EOF (PM); never drop/rewrite those late rows.
-      const bool closing_batch = (watermark >= kAmCloseMs && watermark <= kPmOpenMs) ||
-                                  watermark >= kPmCloseMs;
+      const bool closing_batch = (watermark >= kAmCloseMs && watermark <= kPmOpenMs) || watermark >= kPmCloseMs;
       if (!closing_batch && end - emitted >= window_batch) close_windows(end, false);
     }
   }
   if (input_error) fail_workers();
-  if (streaming && !input_error) close_windows(kNumEndpoints, true);
+  if (streaming && !input_error && !journal_input) close_windows(kNumEndpoints, true);
   } catch (const std::exception& e) {
     input_failure = e.what();
     fail_workers();
   }
-  if (in != stdin) std::fclose(in);
+  if (in && in != stdin) std::fclose(in);
   const auto dispatched = std::chrono::steady_clock::now();
   input_done.store(true, std::memory_order_release);
 
@@ -621,11 +727,13 @@ int Run(int argc, char** argv) {
       try { std::rethrow_exception(ctx->error); }
       catch (const std::exception& e) { std::cerr << "worker failed: " << e.what() << "\n"; }
     }
+    write_status("failed", true);
     return 1;
   }
   if (input_error) { std::cerr << "truncated or unreadable DTYPE stream\n"; return 1; }
 #ifdef CMS_RTF_HAS_ARROW
   if (streaming) arrow->Commit();
+  write_status(stopping ? "stopped" : "completed", true);
 #endif
   size_t pending_peak = 0;
   double max_worker_event_seconds = 0, max_worker_close_seconds = 0;

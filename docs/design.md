@@ -216,3 +216,40 @@ EOF 的压缩 SH 身份表与活跃委托没有删除；最终 Arrow 的 batch �
 vector 容量。worker 的预算计数器按 cache line 对齐；空队列先短暂 yield，连续
 空转后等待 25 微秒（有事件时恢复批量处理），减少 reader 工作时其他线程持续
 调用 sched_yield 的 CPU 开销。真实峰值仍以进程 RSS 实测为准。
+
+## 直接 journal 实盘入口及源码部署（2026-10-13）
+
+用户确认复用招商机现有 gateway/paged，新增 cms_rtf 跟读入口。以上批处理章节
+是历史实现边界；当前 `--journal DIR` 路径在同一 C++ 程序内完成读取、解析、
+分发、窗口聚合及 Arrow 输出，不启用离线 exporter、不写逐股文件。
+
+reader 每次只映射一页 128 MiB，O_RDONLY/MAP_SHARED，按已提交 status 字节
+acquire 后检查 frame v2、长度、hash、cms_l2_raw_v1 版本、日期、seq、epoch；
+跨页只向下一页前进，等待未初始化/未提交帧及尚未创建的下一页。
+原网关 decoder/时间校验按精确源 hash 放在 third_party/cms_protocol，保持协议
+同源且不链接 gateway/paged；ABI 对应 Kungfu a06af6c 的 137B/38B 页帧头。
+帧中额外时间优先，控制记录仅推动时钟/质量统计，不进入因子事件 ABI。
+
+实盘与新的 journal replay 采用同一 source-clock 调度，每 500ms 检查通道水位。
+只有 follow 读空、确认目前已提交帧读完后，才允许此前采样的墙钟推动显式会话
+定时器。Huatai 546aba2 worker.cpp:303–309 的 AM/PM close +60s 规则用于
+11:31/15:01 收尾；保留已发现的 CMS 收盘批次等待，避免将 15:00 最大已见时间
+误当成全部股票尾部已到。不会按日内普通空闲超时强行发布落后通道的窗口。
+
+Huatai worker.cpp:119–122：已发布端点不可回改。journal 模式下迟到事件计数，
+继续更新盘口、SH 身份及 SZ 前序价格，抑制已发布桶的流量；下一未发布端点可使用
+更新后的盘口。不把迟到流量挤进后续桶，盘前 seed 在首窗发布后不再修改。
+新出现股票继承全局已发布位置，不能重新创建历史捕获。
+原 DTYPE 模式保留原拒绝迟到策略与 EOF 补齐契约，106 列、公式及固定求和顺序不改。
+因此新实盘路径不承诺与无限等待历史聚合在迟到事件处逐位相同。
+
+follow 直接创建新 Arrow 文件并逐批 flush；失败保留已发布前缀与 failed 状态，
+既有文件拒绝覆盖。stop 不补未来窗口；日期 current 在新进程追平且有发布后切换。
+重启从当日首帧重建状态，不存在热恢复快照。原离线路径继续原子提交最终文件。
+默认 8 workers 与 256 MiB pending payload；账户状态、SH 身份、页映射另计，
+全进程内存和实盘延迟仍需目标机实际验证，不将回放结果直接冒充实盘指标。
+
+部署参考 Huatai sync_online_bundle.sh：查询实际线上 commit，bundle 增量、校验
+SHA256/前置条件、独立 Git worktree、目标机原生编译及测试后原子切换。
+用户级工具链和现有 Arrow 安装独立于系统包管理，不改网关/paged/cron。
+实现与操作见 docs/deploy-live.md，所有发布以 deployment.json 与构建日志为凭。

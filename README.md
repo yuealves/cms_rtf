@@ -1,20 +1,22 @@
 # cms_rtf
 
-招商（CMS）逐笔行情的**指数 500ms 因子**离线批处理。输入 `/data/tickl2_data_cms/<YYYYMMDD>/`
+招商（CMS）逐笔行情的**指数 500ms 因子**实时计算与离线批处理。实时入口直接跟读
+gateway 正在写入的 `cms_l2_raw_v1` journal。离线入口输入 `/data/tickl2_data_cms/<YYYYMMDD>/`
 的 order/trade parquet 分片（archive_journal 产物），输出与线上 light_rtf v2 同口径的
 `index_500ms/<YYYYMMDD>/index_500ms_exch.arrow`（Arrow IPC stream：
 datetime[us 北京墙钟] + code + 106×Float32，NaN→null）。
 
 - **操作入口（跑一天/对拍/测试/故障排查）**：[docs/how-to.md](docs/how-to.md)
+- **招商机源码部署与实时运行**：[docs/deploy-live.md](docs/deploy-live.md)
 - 设计（批处理架构与口径移植边界）：[docs/design.md](docs/design.md)
 - 验证记录：[docs/validation/](docs/validation/)
 - AI 协作入口：[AGENTS.md](AGENTS.md)
 
 语义基准：light_rtf v2 的 index_500ms family。本项目是它的
-**CMS 数据源批处理移植**：同一套 106 列定义、同一套簿/流量/聚合语义，但
+**CMS 数据源移植**：同一套 106 列定义、同一套簿/流量/聚合语义，但
 - 只有交易所网格（local 网格不实现——不同采集机的接收时间本来也不可比）；
-- 多线程 journal 路径按通道水位关闭窗口，EOF 补齐 28,800 端点；目前的驱动用于
-  replay，尚未包含 journal 实时跟随与实盘会话定时器。
+- `--journal` 支持实时跟随、会话定时器与直接 Arrow 发布；`--journal-mode replay`
+  使用原始记录时钟复现该路径。原 DTYPE replay 接口仍在 EOF 补齐全天端点。
 
 ## 架构
 
@@ -72,7 +74,7 @@ PYTHONPATH=python python3 -m cms_rtf.run_day --day 20261009 \
 
 ## 红线
 
-- 不修改线上任何组件；只读本机 parquet 与参考数据目录。
+- cms_rtf 独立部署；只读 journal、parquet 与参考输入，不修改网关、paged 和归档组件。
 - 106 列顺序是**对拍契约**（`python/cms_rtf/catalog.py`），禁止改动。
 - 与 HT 参考值的差异主要来自两路采集本身（丢包/口径），对拍口径见
   `python/cms_rtf/compare.py` 与 `docs/validation/`。

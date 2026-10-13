@@ -77,13 +77,14 @@ class SymbolRunner {
     // 2) 簿（全事件）3) 流量（会话口径自闭）4) 捕获更新（事件后簿；15:00 后的事件
     //    不更新捕获——与引擎 CaptureExchange 的 pos>=size 早退一致）
     book_.OnEvent(ev);
-    flow_.OnEvent(ev, [this](int32_t ep, const double* bases) { EmitFlow(ep, bases); });
+    flow_.OnEvent(ev, [this](int32_t ep, const double* bases) { EmitFlow(ep, bases); },
+                  !live_ || published_end_ == 0 || ev.time_ms > grid_[published_end_ - 1]);
     last_act_ms_ = ev.time_ms;
     if (in_grid) {
       cap_.act_ms = last_act_ms_;
       cap_.set = true;
       capture_pending_ = true;
-      if (ev.time_ms <= kMarketOpenMs) {
+      if (ev.time_ms <= kMarketOpenMs && (!live_ || published_end_ == 0)) {
         // Same midpoint expression as ComputeBookFeatures, including invalid books.
         const auto snap = book_.Capture();
         seed_mid_ = snap.valid ? (snap.ask_px[0] + snap.bid_px[0]) / 2.0
@@ -101,9 +102,19 @@ class SymbolRunner {
 
   double seed_mid() const { return seed_mid_; }
 
+  // Huatai worker.cpp:119-122: keep updating books/identities and SZ reference
+  // prices, but do not add a late event's flow to a later bucket or rewrite an
+  // already published capture. Newly observed stocks inherit the global cutoff.
+  void EnableLive(int published_end) {
+    live_ = true;
+    published_end_ = published_end;
+    if (published_end > 0) grid_pos_ = std::max(grid_pos_, published_end);
+  }
+
   void CloseThrough(int end) {
     flow_.CloseThrough(grid_[end - 1], [this](int32_t ep, const double* bases) { EmitFlow(ep, bases); });
     if (grid_pos_ >= 0 && grid_pos_ < end) { SealTo(end); grid_pos_ = end; }
+    published_end_ = end;
   }
   const BookHealth& health() const { return book_.health(); }
   int64_t non_monotonic() const { return flow_.non_monotonic(); }
@@ -161,6 +172,8 @@ class SymbolRunner {
   bool capture_pending_ = false;
   int32_t last_act_ms_ = -1;
   double seed_mid_;
+  bool live_ = false;
+  int published_end_ = 0;
 };
 
 }  // namespace cms_rtf

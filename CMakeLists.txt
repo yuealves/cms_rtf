@@ -18,6 +18,12 @@ target_link_libraries(cms_index500ms_day PRIVATE cms_rtf_core)
 
 add_executable(cms_index500ms_mt app/cms_index500ms_mt.cpp)
 target_link_libraries(cms_index500ms_mt PRIVATE cms_rtf_core)
+add_library(cms_rtf_journal src/journal_input.cpp
+  third_party/cms_protocol/src/protocol.cpp
+  third_party/cms_protocol/src/common.cpp
+  third_party/cms_protocol/src/metrics.cpp)
+target_include_directories(cms_rtf_journal PUBLIC include PRIVATE third_party/cms_protocol/include)
+target_link_libraries(cms_index500ms_mt PRIVATE cms_rtf_journal)
 
 option(CMS_RTF_BUILD_AGGREGATE "Build native aggregation and Arrow output" ON)
 if(CMS_RTF_BUILD_AGGREGATE)

@@ -1,0 +1,40 @@
+{
+  "cms_market_gateway": {
+    "commit": "0abaa1381b471c99d7892b2d46eae1f52d7b1377",
+    "files": {
+      "include/cms/core.hpp": {
+        "destination": "include/cms/core.hpp",
+        "sha256": "3ec033f5e5b8b150869ee9820581ff8ba3fcf9c88a305354c0ef5eab31cf407d"
+      },
+      "include/cms/metrics.hpp": {
+        "destination": "include/cms/metrics.hpp",
+        "sha256": "1ba7e917d3b5db6a2cd42582504c2fb523a1eb5ecb0897cbd88471f07e7acc3d"
+      },
+      "src/protocol.cpp": {
+        "destination": "src/protocol.cpp",
+        "sha256": "a6d0dc54cbb199b5c4c3d2fe7f52f5bfcaf2a9fad58d48164e4ae38dc9c4890e"
+      },
+      "src/common.cpp": {
+        "destination": "src/common.cpp",
+        "sha256": "59d208d96fc49a180fdfaa4ed5909a46b57643d3dfcf69aa6bf6a9c84b45d295"
+      },
+      "src/metrics.cpp": {
+        "destination": "src/metrics.cpp",
+        "sha256": "d2d2fe2981f4bfa8409281ed0dc0a1b2a65ed74a1558ce83aaf4b81316a6418d"
+      }
+    }
+  },
+  "kungfu_cms": {
+    "commit": "a06af6ce34765b2bb2a674c3c474fcd87cdc8200",
+    "files": {
+      "yijinjing/utils/json.hpp": {
+        "destination": "include/json.hpp",
+        "sha256": "48122fc9b80e4b0793d8e77f46f4e5e67004adfe283461a9ef38a0ce788c492e"
+      },
+      "LICENSE": {
+        "destination": "Kungfu-LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      }
+    }
+  }
+}

@@ -22,6 +22,7 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "cms_rtf/catalog.h"
 #include "cms_rtf/events.h"
@@ -177,13 +178,20 @@ struct ArrowOutput::Impl {
   std::shared_ptr<arrow::ipc::RecordBatchWriter> writer;
   std::vector<int32_t> endpoints;
   std::vector<WindowRows> rows;
-  Impl(const std::string& path, int64_t day) : destination(path),
-      temporary(path + ".tmp." + std::to_string(getpid())), day0(day) {
+  bool live;
+  Impl(const std::string& path, int64_t day, bool publish_live) : destination(path),
+      temporary(publish_live ? path : path + ".tmp." + std::to_string(getpid())), day0(day), live(publish_live) {
     std::vector<std::shared_ptr<arrow::Field>> fields = {
       arrow::field("datetime", arrow::timestamp(arrow::TimeUnit::MICRO)), arrow::field("code", arrow::utf8())};
     for (const char* name : kColumnNames) fields.push_back(arrow::field(name, arrow::float32()));
     schema = arrow::schema(fields);
-    file = Value(arrow::io::FileOutputStream::Open(temporary));
+    if (live) {
+      const int fd = ::open(temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+      if (fd < 0) throw std::runtime_error("live output must be a new writable path: " + temporary);
+      auto opened = arrow::io::FileOutputStream::Open(fd);
+      if (!opened.ok()) { ::close(fd); throw std::runtime_error(opened.status().ToString()); }
+      file = *opened;
+    } else file = Value(arrow::io::FileOutputStream::Open(temporary));
     writer = Value(arrow::ipc::MakeStreamWriter(file, schema));
     endpoints.reserve(1024); rows.reserve(1024);
   }
@@ -192,11 +200,12 @@ struct ArrowOutput::Impl {
       if (writer) (void)writer->Close();
       if (file) (void)file->Close();
       std::error_code ignored;
-      std::filesystem::remove(temporary, ignored);
+      if (!live) std::filesystem::remove(temporary, ignored);
     }
   }
 };
-ArrowOutput::ArrowOutput(const std::string& path, int64_t day0) : impl_(std::make_unique<Impl>(path, day0)) {}
+ArrowOutput::ArrowOutput(const std::string& path, int64_t day0, bool live)
+    : impl_(std::make_unique<Impl>(path, day0, live)) {}
 ArrowOutput::~ArrowOutput() = default;
 uint64_t ArrowOutput::rows() const { return impl_->count; }
 void ArrowOutput::Append(int32_t ep, const WindowRows& rows) {
@@ -231,7 +240,7 @@ void ArrowOutput::Flush() {
 void ArrowOutput::Commit() {
   Flush();
   Check(impl_->writer->Close()); Check(impl_->file->Close());
-  std::filesystem::rename(impl_->temporary, impl_->destination);
+  if (!impl_->live) std::filesystem::rename(impl_->temporary, impl_->destination);
   impl_->committed = true;
 }
 }  // namespace cms_rtf::aggregation

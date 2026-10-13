@@ -76,14 +76,14 @@ class SymbolFlow {
   // 处理一个事件；session 边界封口、桶推进与发布（经 Emit 回调）都在内部完成。
   // 输出：非空桶 → Emit(ep_ms, bases21)。
   template <typename Emit>
-  void OnEvent(const EventRec& ev, Emit&& emit) {
+  void OnEvent(const EventRec& ev, Emit&& emit, bool allow_flow = true) {
     // 时段跨越先封口（light_rtf worker.cpp OnEvent 的 session-boundary seal）
     if (ev.time_ms > kPmCloseMs) {
       AdvanceTo(kPmCloseMs + kGridMs, emit);
     } else if (ev.time_ms > kAmCloseMs && ev.time_ms <= kPmOpenMs) {
       AdvanceTo(kAmCloseMs + kGridMs, emit);
     }
-    const bool in_session = InSessionExchMs(ev.time_ms);
+    const bool in_session = InSessionExchMs(ev.time_ms) && allow_flow;
     if (ev.kind == 0) {
       OnOrder(ev, in_session, emit);
     } else {
