@@ -68,15 +68,19 @@ int main() {
     assert(sink.buckets.size() == 1);
     const auto& b = sink.buckets.begin()->second;
     assert(sink.buckets.begin()->first == 34'200'500);
-    assert(b[0] == 1 && b[1] == 1);             // buy/sell count 各 1
-    assert(b[2] == 100 + 100 && b[3] == 50);    // volume：A 100 + 主动 T 100；卖 50
-    // money：碎片 100 股 × 桶末已知价 max(10.00,10.01)=10.01；卖 50×10.10
-    assert(std::abs(b[4] - 100 * 10.01) < 1e-9);
-    assert(std::abs(b[5] - 50 * 10.10) < 1e-9);
-    assert(b[8] == 2);  // resolved count（SH count 即 resolved）
-    // 大小单：已知累计量 200 股 × 10.01 = 2002 < 5 万 → small；卖 50×10.10=505 也 small
+    assert(b[0] == 1 && b[1] == 0);             // .700 的卖单属于下一桶
+    assert(b[2] == 100 + 100 && b[3] == 0);    // A 100 + 主动 T 100
+    // 新增量 200 股 × 桶末已知价 max(10.00,10.01)=10.01
+    assert(std::abs(b[4] - 200 * 10.01) < 1e-9);
+    assert(b[5] == 0);
+    assert(b[8] == 1);  // 同一 SH 身份只计一次
+    // 已知累计量 200 股 × 10.01 = 2002 < 5 万 → small
     assert(b[6] == 0.0);
-    assert(std::abs(b[7] - (200 * 10.01 + 50 * 10.10)) < 1e-9);
+    assert(std::abs(b[7] - 200 * 10.01) < 1e-9);
+    f.Finish(emit);
+    const auto& next = sink.buckets.at(34'201'000);
+    assert(next[1] == 1 && next[3] == 50);
+    assert(std::abs(next[5] - 50 * 10.10) < 1e-9);
     std::printf("flow sh basic ok\n");
   }
 

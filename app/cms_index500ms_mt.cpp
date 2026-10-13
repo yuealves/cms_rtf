@@ -9,6 +9,9 @@
 // 输入：cms_journal_export 的 128B DTYPE 行流（文件；头部 CMSPQ01\0 自动跳过）。
 // 输出：work_dir/w{i}/{book,flow,seeds}.bin + 健康汇总 JSON（stdout）。
 #include <algorithm>
+#include <array>
+#include <chrono>
+#include <filesystem>
 #include <atomic>
 #include <cinttypes>
 #include <cstdint>
@@ -43,7 +46,14 @@ struct DtypeRow {
 static_assert(sizeof(DtypeRow) == 128, "DTYPE row layout changed");
 
 inline int32_t parse_symbol(const char* s) {
-  // S8 NUL 填充定长字符串
+  if (s[6] == 0) {
+    int32_t value = 0;
+    int i = 0;
+    for (; i < 6 && s[i] >= '0' && s[i] <= '9'; ++i)
+      value = value * 10 + (s[i] - '0');
+    if (i == 6) return value;
+  }
+  // Preserve the headerless legacy input parser for other S8 strings.
   char buf[9];
   std::memcpy(buf, s, 8);
   buf[8] = '\0';
@@ -56,9 +66,9 @@ inline int32_t hhmmssmmm_to_ms(int64_t v) {
 }
 
 // DTYPE 行 → canonical EventRec（规则与 cms_rtf/python/cms_rtf/journal_events.py 一致）
-EventRec map_row(const DtypeRow& r) {
+EventRec map_row(const DtypeRow& r, int32_t symbol) {
   EventRec ev{};
-  ev.symbol = parse_symbol(r.symbol);
+  ev.symbol = symbol;
   const bool is_sh = r.market == 1;
   ev.channel = r.channel;
   ev.biz_index = static_cast<int32_t>(r.business_seq);
@@ -107,6 +117,7 @@ struct WorkerCtx {
   std::thread thread;
   std::unordered_map<int32_t, SymbolRunner*> states;
   std::unordered_map<int32_t, SymbolBuffers> bufs;
+  std::exception_ptr error;
   BookHealth health;
   int64_t nonmono = 0;
   int64_t events = 0;
@@ -134,6 +145,10 @@ int main(int argc, char** argv) {
   std::unordered_map<int32_t, Thresh> thresh;
   {
     std::ifstream in(thresh_path, std::ios::binary);
+    if (!in) { std::cerr << "cannot open thresholds\n"; return 1; }
+    if (std::filesystem::file_size(thresh_path) % 20 != 0) {
+      std::cerr << "truncated thresholds\n"; return 1;
+    }
     int32_t sym;
     Thresh t;
     while (in.read(reinterpret_cast<char*>(&sym), 4) &&
@@ -143,15 +158,37 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (!std::filesystem::is_directory(work_dir)) {
+    std::cerr << "work directory must exist\n"; return 1;
+  }
+  FILE* in = input_path == "-" ? stdin : std::fopen(input_path.c_str(), "rb");
+  if (!in) { std::cerr << "cannot open " << input_path << "\n"; return 1; }
+  std::array<char, 8> prefix{};
+  const size_t prefix_size = std::fread(prefix.data(), 1, prefix.size(), in);
+  const bool has_magic = prefix_size == 8 && std::memcmp(prefix.data(), "CMSPQ01\0", 8) == 0;
+  if (input_path == "-" && !has_magic) {
+    std::cerr << "stdin requires CMSPQ01 header\n"; return 1;
+  }
+  std::vector<int8_t> dispatch(1000000, -1);
+  for (const auto& item : thresh) {
+    if (item.first < 0 || item.first >= static_cast<int32_t>(dispatch.size())) {
+      std::cerr << "threshold symbol outside six-digit universe\n"; return 1;
+    }
+    dispatch[item.first] = (static_cast<uint32_t>(item.first) * 2654435761u) % workers;
+  }
+  const auto started = std::chrono::steady_clock::now();
   const auto grid = BuildGrid();
   std::vector<std::unique_ptr<WorkerCtx>> ctxs(workers);
   std::atomic<bool> input_done{false};
-  std::atomic<int64_t> spin_waits{0};
+  std::atomic<bool> worker_failed{false};
+  int64_t spin_waits = 0;
+  constexpr size_t kBatchSize = 256;
 
   for (int i = 0; i < workers; ++i) {
     auto ctx = std::make_unique<WorkerCtx>();
     ctx->thread = std::thread([&, i, ctx = ctx.get()]() {
-      EventRec ev;
+      try {
+      std::array<EventRec, kBatchSize> batch;
       auto finish_all = [&]() {
         // 按 symbol 升序连续落盘：聚合层的读法依赖组内连续
         std::ofstream book_out(work_dir + "/w" + std::to_string(i) + ".book.bin",
@@ -160,6 +197,9 @@ int main(int argc, char** argv) {
                                std::ios::binary);
         std::ofstream seeds_out(work_dir + "/w" + std::to_string(i) + ".seeds.bin",
                                 std::ios::binary);
+        book_out.exceptions(std::ios::failbit | std::ios::badbit);
+        flow_out.exceptions(std::ios::failbit | std::ios::badbit);
+        seeds_out.exceptions(std::ios::failbit | std::ios::badbit);
         std::vector<int32_t> syms;
         syms.reserve(ctx->states.size());
         for (auto& [sym, runner] : ctx->states) {
@@ -186,12 +226,23 @@ int main(int argc, char** argv) {
           flow_out.write(reinterpret_cast<const char*>(buf.flow.data()),
                          static_cast<std::streamsize>(buf.flow.size() * sizeof(FlowRec)));
           delete runner;
+          ctx->bufs.erase(sym);
         }
+        book_out.close(); flow_out.close(); seeds_out.close();
         ctx->states.clear();
         ctx->bufs.clear();
       };
-      while (true) {
-        if (ctx->ring.pop(ev)) {
+      while (!worker_failed.load(std::memory_order_relaxed)) {
+        size_t count = ctx->ring.pop_batch(batch.data(), batch.size());
+        if (!count && input_done.load(std::memory_order_acquire)) {
+          // Acquire completion before the final drain. The first empty check
+          // may have raced with the producer's last publication.
+          count = ctx->ring.pop_batch(batch.data(), batch.size());
+          if (!count) break;
+        }
+        if (!count) { std::this_thread::yield(); continue; }
+        for (size_t k = 0; k < count; ++k) {
+          const EventRec& ev = batch[k];
           auto it = ctx->states.find(ev.symbol);
           if (it == ctx->states.end()) {
             const auto th = thresh.find(ev.symbol);
@@ -206,48 +257,58 @@ int main(int argc, char** argv) {
           }
           it->second->OnEvent(ev);
           ++ctx->events;
-        } else if (input_done.load(std::memory_order_acquire)) {
-          break;
-        } else {
-          std::this_thread::yield();
         }
       }
-      finish_all();
+      if (!worker_failed.load()) finish_all();
+      } catch (...) {
+        ctx->error = std::current_exception();
+        worker_failed.store(true);
+      }
     });
     ctxs[i] = std::move(ctx);
   }
 
-  // reader 线程：顺序读 + 映射 + hash 分发（背压：ring 满则自旋）
-  FILE* in = std::fopen(input_path.c_str(), "rb");
-  if (!in) {
-    std::cerr << "cannot open " << input_path << "\n";
-    return 1;
-  }
-  {
-    char magic[8];
-    if (std::fread(magic, 1, 8, in) != 8 || std::memcmp(magic, "CMSPQ01\0", 8) != 0) {
-      std::fseek(in, 0, SEEK_SET);  // 无头部则从头读
+  // Filter before mapping; publish bounded batches to amortize cache-line traffic.
+  std::vector<std::array<EventRec, kBatchSize>> pending(workers);
+  std::vector<size_t> pending_size(workers, 0);
+  auto flush = [&](int i) {
+    size_t sent = 0;
+    while (sent < pending_size[i] && !worker_failed.load(std::memory_order_relaxed)) {
+      const size_t n = ctxs[i]->ring.push_batch(pending[i].data() + sent,
+                                                pending_size[i] - sent);
+      sent += n;
+      if (!n) { ++spin_waits; std::this_thread::yield(); }
     }
-  }
+    pending_size[i] = 0;
+  };
   std::vector<DtypeRow> rows(1 << 16);
-  int64_t n_events = 0;
-  size_t got;
-  while ((got = std::fread(rows.data(), sizeof(DtypeRow), rows.size(), in)) > 0) {
+  int64_t n_events = 0, input_rows = 0;
+  size_t carry = has_magic ? 0 : prefix_size;
+  if (carry) std::memcpy(rows.data(), prefix.data(), carry);
+  bool input_error = false;
+  while (!worker_failed.load(std::memory_order_relaxed)) {
+    const size_t bytes = std::fread(reinterpret_cast<char*>(rows.data()) + carry, 1,
+                                   rows.size() * sizeof(DtypeRow) - carry, in);
+    const size_t total = bytes + carry;
+    const size_t got = total / sizeof(DtypeRow);
+    input_rows += got;
     for (size_t j = 0; j < got; ++j) {
-      EventRec ev = map_row(rows[j]);
-      if (thresh.find(ev.symbol) == thresh.end()) {
-        continue;  // 非成分股不进引擎（与 codec 的成分股过滤一致）
-      }
-      const uint32_t mixed = static_cast<uint32_t>(ev.symbol) * 2654435761u;
-      WorkerCtx& ctx = *ctxs[mixed % workers];
-      while (!ctx.ring.push(ev)) {
-        ++spin_waits;
-        std::this_thread::yield();
-      }
+      const int32_t sym = parse_symbol(rows[j].symbol);
+      if (sym < 0 || sym >= static_cast<int32_t>(dispatch.size())) continue;
+      const int worker = dispatch[sym];
+      if (worker < 0) continue;
+      pending[worker][pending_size[worker]++] = map_row(rows[j], sym);
+      if (pending_size[worker] == kBatchSize) flush(worker);
       ++n_events;
     }
+    for (int i = 0; i < workers; ++i) flush(i);
+    carry = total % sizeof(DtypeRow);
+    if (carry) std::memmove(rows.data(), reinterpret_cast<char*>(rows.data()) +
+                            got * sizeof(DtypeRow), carry);
+    if (!bytes) { input_error = std::ferror(in) || carry != 0; break; }
   }
-  std::fclose(in);
+  if (in != stdin) std::fclose(in);
+  const auto dispatched = std::chrono::steady_clock::now();
   input_done.store(true, std::memory_order_release);
 
   BookHealth total;
@@ -263,12 +324,24 @@ int main(int argc, char** argv) {
     total.immediate_fill += ctx->health.immediate_fill;
     nonmono += ctx->nonmono;
   }
-  std::printf("{\"events\": %" PRId64 ", \"workers\": %d, \"spin_waits\": %" PRId64
+  if (worker_failed.load()) {
+    for (auto& ctx : ctxs) if (ctx->error) {
+      try { std::rethrow_exception(ctx->error); }
+      catch (const std::exception& e) { std::cerr << "worker failed: " << e.what() << "\n"; }
+    }
+    return 1;
+  }
+  if (input_error) { std::cerr << "truncated or unreadable DTYPE stream\n"; return 1; }
+  const auto finished = std::chrono::steady_clock::now();
+  const double dispatch_s = std::chrono::duration<double>(dispatched - started).count();
+  const double total_s = std::chrono::duration<double>(finished - started).count();
+  std::printf("{\"input_rows\": %" PRId64 ", \"dispatch_seconds\": %.6f, "
+              "\"total_seconds\": %.6f, \"events\": %" PRId64 ", \"workers\": %d, \"spin_waits\": %" PRId64
               ", \"over_deduct\": %" PRId64 ", \"d_unknown\": %" PRId64
               ", \"unknown_trade_ref\": %" PRId64 ", \"late_passive_ref\": %" PRId64
               ", \"agg_skip\": %" PRId64 ", \"crossed_book\": %" PRId64
               ", \"immediate_fill\": %" PRId64 ", \"sz_non_monotonic\": %" PRId64 "}\n",
-              n_events, workers, spin_waits.load(), total.over_deduct, total.d_unknown,
+              input_rows, dispatch_s, total_s, n_events, workers, spin_waits, total.over_deduct, total.d_unknown,
               total.unknown_trade_ref, total.late_passive_ref, total.agg_skip,
               total.crossed_book, total.immediate_fill, nonmono);
   return 0;

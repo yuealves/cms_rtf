@@ -85,6 +85,22 @@ def rolling_sum_session(agg21_f32, grid):
     return out
 
 
+def _symbol_groups(paths, dtype):
+    """Merge symbol-contiguous worker files without copying all records into RAM."""
+    groups = []
+    for path in paths:
+        if not Path(path).stat().st_size:
+            continue
+        records = np.memmap(path, dtype=dtype, mode='r')
+        bounds = np.flatnonzero(np.r_[True,
+            records['symbol'][1:] != records['symbol'][:-1], True])
+        groups.extend((int(records['symbol'][lo]), records[lo:hi])
+                      for lo, hi in zip(bounds[:-1], bounds[1:]))
+    # Stable sorting preserves the old concatenation order for repeated groups.
+    groups.sort(key=lambda item: item[0])
+    return groups
+
+
 def aggregate(book_path, flow_path, seeds_path, ref, day):
     book_path = [book_path] if isinstance(book_path, (str, Path)) else list(book_path)
     flow_path = [flow_path] if isinstance(flow_path, (str, Path)) else list(flow_path)
@@ -115,30 +131,11 @@ def aggregate(book_path, flow_path, seeds_path, ref, day):
         for s, m in zip(seeds_arr['symbol'].astype(np.int32), seeds_arr['seed_mid']):
             seeds[s] = m
 
-    def read_recs(paths, dtype):
-        parts = []
-        for p in paths:
-            if Path(p).stat().st_size:
-                parts.append(np.memmap(p, dtype=dtype, mode='r'))
-        if not parts:
-            return np.zeros(0, dtype=dtype)
-        if len(parts) == 1:
-            return parts[0]
-        return np.concatenate(parts)
-
-    book = read_recs(book_path, BOOK_REC)
-    flow = read_recs(flow_path, FLOW_REC)
-
     # ---- 簿：逐股展开到端点网格 ----
-    bounds = np.flatnonzero(np.r_[True, book['symbol'][1:] != book['symbol'][:-1], True])
-    groups = sorted(zip(book['symbol'][bounds[:-1]], bounds[:-1], bounds[1:]))
-    for _, lo, hi in groups:
-        recs = book[lo:hi]
-        sym = int(recs['symbol'][0])
+    for sym, recs in _symbol_groups(book_path, BOOK_REC):
         entries = sym_idx.get(sym)
         if not entries:
             continue
-        ep_idx = np.searchsorted(grid, recs['ep_ms'])
         # 端点 e 的捕获 = 最后一条 ep ≤ e 的记录
         sel = np.searchsorted(recs['ep_ms'], grid, side='right') - 1
         present = sel >= 0
@@ -164,16 +161,7 @@ def aggregate(book_path, flow_path, seeds_path, ref, day):
             fresh_w[i] += w * (age_ok & (age < 0.5))
 
     # ---- 流量：逐股散布进指数 ----
-    if len(flow):
-        fbounds = np.flatnonzero(np.r_[True, flow['symbol'][1:] != flow['symbol'][:-1], True])
-        fgroups = sorted(zip(flow['symbol'][fbounds[:-1]], fbounds[:-1], fbounds[1:]))
-    else:
-        fgroups = []
-    for _, lo, hi in fgroups:
-        recs = flow[lo:hi]
-        if not len(recs):
-            continue
-        sym = int(recs['symbol'][0])
+    for sym, recs in _symbol_groups(flow_path, FLOW_REC):
         entries = sym_idx.get(sym)
         if not entries:
             continue
@@ -182,11 +170,20 @@ def aggregate(book_path, flow_path, seeds_path, ref, day):
         a_order = bases[:, 0:4].sum(axis=1) > 0
         a_cancel = bases[:, 9:13].sum(axis=1) > 0
         a_trade = bases[:, 13:17].sum(axis=1) > 0
+        unique_endpoints = np.all(ep_idx[1:] > ep_idx[:-1])
         for i, w in entries:
-            np.add.at(agg21[i], ep_idx, w * bases)
-            np.add.at(act3[i, :, 0], ep_idx, w * a_order)
-            np.add.at(act3[i, :, 1], ep_idx, w * a_cancel)
-            np.add.at(act3[i, :, 2], ep_idx, w * a_trade)
+            if unique_endpoints:
+                # Each target occurs once; same double addition as add.at, in
+                # the same symbol order, without its repeated-index machinery.
+                agg21[i, ep_idx] += w * bases
+                act3[i, ep_idx, 0] += w * a_order
+                act3[i, ep_idx, 1] += w * a_cancel
+                act3[i, ep_idx, 2] += w * a_trade
+            else:
+                np.add.at(agg21[i], ep_idx, w * bases)
+                np.add.at(act3[i, :, 0], ep_idx, w * a_order)
+                np.add.at(act3[i, :, 1], ep_idx, w * a_cancel)
+                np.add.at(act3[i, :, 2], ep_idx, w * a_trade)
 
     # ---- 逐指数出列 ----
     all_rows = []

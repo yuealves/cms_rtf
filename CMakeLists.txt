@@ -27,3 +27,15 @@ add_test(NAME book COMMAND test_book)
 add_executable(test_flow tests/cpp/test_flow.cpp)
 target_link_libraries(test_flow PRIVATE cms_rtf_core)
 add_test(NAME flow COMMAND test_flow)
+
+add_executable(test_runner tests/cpp/test_runner.cpp)
+target_link_libraries(test_runner PRIVATE cms_rtf_core)
+add_test(NAME runner COMMAND test_runner)
+
+add_executable(test_ring tests/cpp/test_ring.cpp)
+target_link_libraries(test_ring PRIVATE cms_rtf_core)
+add_test(NAME ring COMMAND test_ring)
+
+# Release builds must still execute the assertions in the original unit tests.
+target_compile_options(test_book PRIVATE -UNDEBUG)
+target_compile_options(test_flow PRIVATE -UNDEBUG)

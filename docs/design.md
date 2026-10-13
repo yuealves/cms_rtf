@@ -68,3 +68,25 @@ book/flow/seeds --aggregate.py--> index_500ms_exch.arrow (115,200 行 × 108 列
 2. SH 集合竞价成交（side N）不进 trade 族、不进 ShNote，但进簿（双腿按被动扣量）。
 3. CMS 导出只含 A/D/T 三类可动作事件 ⇒ `act_ms` 恒等于最后事件时间；
    心跳/状态行本来就被 archiver 排除，无需处理。
+
+## Replay 性能路径（2026-10-13）
+
+`run_journal_mt` 默认把现有网关 mmap exporter 的 stdout 直接接入内核 stdin，
+不再完整落盘 128B DTYPE 流。`--keep-stream` 保留分阶段文件模式；
+`--export-threads N` 接入网关 `0abaa13` 的页并行导出，默认 1。
+当前网关并行实现会缓存全天全部 DTYPE 行（约 64 GiB），因此线程数显式选取。
+生产者和消费者必须都成功才允许聚合，截断记录、错误 magic 和输出写入失败拒绝成功。
+
+内核成分股过滤提前到映射前；每 worker 用有界 256 条批次发布/消费 SPSC ring，
+仍保持每股到达序，EOF acquire 后再 drain 一次，避免最后一次入队与空队列检查竞态。
+
+盘口特征延迟到端点穿越/EOF 时计算，桶内被后续事件覆盖的中间快照无需计算。
+第一次处理 15:00 后事件前冻结最后网格内快照；后续乱序回到网格内仍按旧逻辑更新。
+开盘前值继续逐事件保留最后 midpoint（含无效簿 NaN），不受端点延迟计算影响。
+等价对象为 `1e22619` 的 eager runner；上游对应
+`light_rtf/src/factors/index_500ms/worker.cpp:161–186` 的 CaptureExchange。
+31 个公式、流量状态机、网格和量化点均保持原实现。
+
+聚合按 symbol 升序遍历各 worker 文件的 mmap 视图，免去全量 concatenate 拷贝。
+每股流量端点严格递增时用向量索引相加；重复端点仍走 `np.add.at`，
+股票加权顺序和每次 Float64 运算不变。

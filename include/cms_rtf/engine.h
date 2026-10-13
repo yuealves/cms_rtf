@@ -13,6 +13,7 @@
 //   - 聚合按固定 symbol 升序逐项相加 ⇒ 输出与 worker 数无关（位级一致）
 //   - ring 满则 reader 自旋等活（背压），不丢事件、不扩容
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <thread>
@@ -45,6 +46,32 @@ class SpscRing {
     v = buf_[t];
     tail_.store((t + 1) & (kCapPow2 - 1), std::memory_order_release);
     return true;
+  }
+
+  // Publish/consume an entire batch with one acquire/release pair. Partial
+  // transfers are allowed; callers retain the remainder to preserve FIFO order.
+  size_t push_batch(const T* values, size_t count) {
+    const size_t h = head_.load(std::memory_order_relaxed);
+    const size_t t = tail_.load(std::memory_order_acquire);
+    const size_t n = std::min(count, (t - h - 1) & (kCapPow2 - 1));
+    if (!n) return 0;
+    const size_t first = std::min(n, kCapPow2 - h);
+    std::copy_n(values, first, buf_.data() + h);
+    std::copy_n(values + first, n - first, buf_.data());
+    head_.store((h + n) & (kCapPow2 - 1), std::memory_order_release);
+    return n;
+  }
+
+  size_t pop_batch(T* values, size_t count) {
+    const size_t t = tail_.load(std::memory_order_relaxed);
+    const size_t h = head_.load(std::memory_order_acquire);
+    const size_t n = std::min(count, (h - t) & (kCapPow2 - 1));
+    if (!n) return 0;
+    const size_t first = std::min(n, kCapPow2 - t);
+    std::copy_n(buf_.data() + t, first, values);
+    std::copy_n(buf_.data(), n - first, values + first);
+    tail_.store((t + n) & (kCapPow2 - 1), std::memory_order_release);
+    return n;
   }
 
  private:

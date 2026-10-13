@@ -75,6 +75,34 @@ class AggregateEndToEndTest(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.grid = agg.endpoint_schedule_ms()
 
+    def test_worker_merge_and_duplicate_endpoint_fallback(self):
+        ref = _ref([1, 600000], [0.3, 0.7])
+        ref['weights'][:] = ref['weights'][0]
+        ref['official'] = ref['weights'].sum(axis=1)
+        books, flows, seeds, duplicate_flows = [], [], [], []
+        # Reversed file order must not change symbol-order accumulation.
+        for sym in [600000, 1]:
+            books.append(_write(self.dir / f'{sym}.book', agg.BOOK_REC,
+                [(sym, int(self.grid[0]), tuple(np.arange(31)), 10., int(self.grid[0]), 1, (0,) * 7)]))
+            seeds.append(_write(self.dir / f'{sym}.seed', agg.SEED_REC, [(sym, 9.)]))
+            records = [(sym, int(self.grid[e]), tuple(np.arange(21) * (e + 1.1))) for e in [0, 3, 14400]]
+            flows.append(_write(self.dir / f'{sym}.flow', agg.FLOW_REC, records))
+            duplicate_flows.append(_write(self.dir / f'{sym}.duplicate', agg.FLOW_REC,
+                [r for record in records for r in [record, (sym, record[1], (0.,) * 21)]]))
+        groups = agg._symbol_groups(books, agg.BOOK_REC)
+        self.assertEqual([s for s, _ in groups], [1, 600000])
+        self.assertTrue(all(isinstance(records, np.memmap) for _, records in groups))
+        _, fast = agg.aggregate(books, flows, seeds, ref, '20261009')
+        _, fallback = agg.aggregate(books, duplicate_flows, seeds, ref, '20261009')
+        for a, b in zip(fast, fallback):
+            np.testing.assert_array_equal(a.view(np.uint32), b.view(np.uint32))
+
+    def test_empty_worker_files(self):
+        paths = [_write(self.dir / name, dtype, []) for name, dtype in
+                 [('book', agg.BOOK_REC), ('flow', agg.FLOW_REC), ('seeds', agg.SEED_REC)]]
+        _, rows = agg.aggregate(*paths, _ref([1], [1.]), '20261009')
+        self.assertTrue(np.all(rows[0][:, 35:] == 0))
+
     def test_minimal(self):
         """2 只成分股（各占 000016 一半权重）的最小端到端聚合。"""
         grid, n = self.grid, len(self.grid)

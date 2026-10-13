@@ -56,6 +56,9 @@ class SymbolRunner {
         SealTo(pos);
         grid_pos_ = pos;
       }
+    } else {
+      // Freeze the last in-grid book before a post-close event mutates it.
+      CapturePending();
     }
     // 2) 簿（全事件）3) 流量（会话口径自闭）4) 捕获更新（事件后簿；15:00 后的事件
     //    不更新捕获——与引擎 CaptureExchange 的 pos>=size 早退一致）
@@ -63,12 +66,14 @@ class SymbolRunner {
     flow_.OnEvent(ev, [this](int32_t ep, const double* bases) { EmitFlow(ep, bases); });
     last_act_ms_ = ev.time_ms;
     if (in_grid) {
-      cap_.snap = book_.Capture();
-      cap_.mid = ComputeBookFeatures(cap_.snap, cap_.feat);
       cap_.act_ms = last_act_ms_;
       cap_.set = true;
+      capture_pending_ = true;
       if (ev.time_ms <= kMarketOpenMs) {
-        seed_mid_ = cap_.mid;  // 开盘收益前值：09:30:00 前最后捕获（不含 RefInScope）
+        // Same midpoint expression as ComputeBookFeatures, including invalid books.
+        const auto snap = book_.Capture();
+        seed_mid_ = snap.valid ? (snap.ask_px[0] + snap.bid_px[0]) / 2.0
+                              : std::numeric_limits<double>::quiet_NaN();
       }
     }
   }
@@ -85,10 +90,19 @@ class SymbolRunner {
   int64_t non_monotonic() const { return flow_.non_monotonic(); }
 
  private:
+  void CapturePending() {
+    if (capture_pending_) {
+      cap_.snap = book_.Capture();
+      cap_.mid = ComputeBookFeatures(cap_.snap, cap_.feat);
+      capture_pending_ = false;
+    }
+  }
+
   void SealTo(int pos) {
     if (!cap_.set) {
       return;
     }
+    CapturePending();
     const bool valid = cap_.snap.valid && RefInScope(symbol_);
     BookRec rec{};
     rec.symbol = symbol_;
@@ -123,6 +137,7 @@ class SymbolRunner {
   std::vector<FlowRec>* flow_out_;
   int grid_pos_ = -1;
   CaptureState cap_{};
+  bool capture_pending_ = false;
   int32_t last_act_ms_ = -1;
   double seed_mid_;
 };

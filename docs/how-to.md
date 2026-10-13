@@ -61,6 +61,38 @@ ctest --test-dir build --output-on-failure                    # 簿/流量内核
 PYTHONPATH=python python3 -m unittest discover -s tests/python -v   # 聚合层
 ```
 
+## Journal replay 与性能对拍
+
+使用已经完成回放的 journal（不需要起 paged），默认省去约 64 GiB/天的 DTYPE 中间文件：
+
+```bash
+PYTHONPATH=python python3 -m cms_rtf.run_journal_mt \
+  --journal <回放 journal 目录> --day 20261009 --workers 8 \
+  --exporter ../cms_market_gateway/build/gateway/bin/cms_journal_export \
+  --gateway-build ../cms_market_gateway \
+  --weights-dir <权重目录> --threshold-dir <阈值目录> --out <输出根目录>
+```
+
+网关需包含 mmap 提交 `0abaa13`。`--export-threads N` 可启用该版本的页并行导出；
+当前并行 exporter 会缓存全天全部行，需额外约 64 GiB 内存，默认使用 1 个线程。
+`--keep-stream` 保留 stream.bin，并分别记录 export/kernel 耗时，方便重复测内核。
+`intermediate/export.summary.json`、`export.stderr.log` 和 `kernel.summary.json`
+分别保留导出质量计数、诊断日志和内核统计。
+
+对同一份 replay DTYPE 流比较旧版和新版，输出目录必须尚不存在：
+
+```bash
+PYTHONPATH=python python3 scripts/benchmark_replay.py \
+  --input <stream.bin> --baseline-root <旧版已编译 worktree> \
+  --weights-dir <权重目录> --threshold-dir <阈值目录> \
+  --workers 8 --check-workers 1 --out <新的基准结果目录> \
+  --reference <已验收的 CMS 因子 arrow>
+```
+
+报告记录两个提交、机器/依赖版本、阶段耗时、健康计数、内核文件 SHA-256 对比和
+最终 106 列逐位检查（包括 null mask、键、schema）。计时复用相同输入，
+不包含一次性的 parquet/cache/journal 准备；机器负载与缓存会影响结果。
+
 ## 故障排查
 
 | 现象 | 处理 |

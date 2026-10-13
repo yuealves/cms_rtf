@@ -100,7 +100,7 @@ static void test_book_features_basic() {
   assert(s.valid);
   double feat[31];
   const double mid = ComputeBookFeatures(s, feat);
-  assert(std::abs(mid - 10.05) < 1e-12);  // (9.99+10.11)/2
+  assert(std::abs(mid - 1.0005) < 1e-12);  // (0.9999+1.0011)/2; ticks are yuan * 10000
   assert(feat[9] > 0 && feat[10] > 0);    // depth totals
   assert(std::isfinite(feat[17]) && std::isfinite(feat[18]));  // slopes
   std::printf("book_features ok mid=%.2f spread_bps=%.4f\n", mid, feat[0]);
