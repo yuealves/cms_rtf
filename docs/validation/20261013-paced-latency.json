@@ -273,5 +273,57 @@
       "max": 462.711569,
       "over_1s": 0
     }
+  },
+  "metric_alignment": {
+    "boundary": "actual close start to Arrow Flush completion; ms, steady_clock, no fsync",
+    "huatai_source_checked": "ht_idc / insight_yjj_test /opt/insight/light_rtf_v2 546aba2",
+    "huatai_also_polls_receive_clock_every_500ms": true,
+    "huatai_log_has_last_read_latency": false,
+    "cms_per_actual_close": {
+      "count": 1705,
+      "mean_ms": 1.5834765407624634,
+      "p50_ms": 1.538047,
+      "p99_ms": 2.335537,
+      "max_ms": 6.823472
+    },
+    "huatai_live_per_cutoff_same_interval": {
+      "count": 1800,
+      "mean_ms": 6.654697822222222,
+      "p50_ms": 6.38638,
+      "p99_ms": 14.0087,
+      "max_ms": 27.5434
+    },
+    "sampling_warning": "Huatai logs each receive-clock cutoff and flushes local+exch; CMS logs emitted exchange endpoints, grouped here by close_id. Replay/live and work differ. No end-to-end performance ranking implied.",
+    "frame_gap_example": {
+      "page": "yjj.cms_l2_raw_v1.27.journal",
+      "target_recv_ns": 1791855300675029269,
+      "frames": [
+        {
+          "recv_ns": 1791855300675029269,
+          "source_ns": 1791855300675037166,
+          "gap_from_window_last_recv_us": 0.0
+        },
+        {
+          "recv_ns": 1791855300675032281,
+          "source_ns": 1791855300675040527,
+          "gap_from_window_last_recv_us": 3.012
+        },
+        {
+          "recv_ns": 1791855300675035379,
+          "source_ns": 1791855300675042834,
+          "gap_from_window_last_recv_us": 6.11
+        },
+        {
+          "recv_ns": 1791855300675039102,
+          "source_ns": 1791855300675043803,
+          "gap_from_window_last_recv_us": 9.833
+        },
+        {
+          "recv_ns": 1791855300675042302,
+          "source_ns": 1791855300675054830,
+          "gap_from_window_last_recv_us": 13.033
+        }
+      ]
+    }
   }
 }
