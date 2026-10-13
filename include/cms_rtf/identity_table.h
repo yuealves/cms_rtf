@@ -22,7 +22,7 @@ template<class Value> class IdentityTable {
     }
     if (size_ == std::numeric_limits<uint32_t>::max())
       throw std::runtime_error("SH identity table exceeds uint32 index capacity");
-    if ((size_ + 1) * 4 > slots_.size() * 3) {
+    if ((size_ + 1) * 2 > slots_.size()) {
       Rehash(slots_.size() * 2);
       pos = Hash(key) & (slots_.size() - 1);
       while (slots_[pos]) pos = (pos + 1) & (slots_.size() - 1);
@@ -42,10 +42,12 @@ template<class Value> class IdentityTable {
   struct Entry { int64_t key = 0; Value value{}; };
   static constexpr size_t kPageEntries = 256;
   static uint64_t Hash(int64_t key) {
-    uint64_t x = static_cast<uint64_t>(key);
-    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-    return x ^ (x >> 31);
+    const uint64_t x = static_cast<uint64_t>(key);
+    // CMS identities are channel sequence numbers: nearby identities are often
+    // accessed together. Preserve that locality instead of scattering them over
+    // the full index; fold high bits so 64-bit keys still contribute to the slot.
+    // Keep the index at most half full to bound clustering on the replay data.
+    return x ^ (x >> 32);
   }
   Entry& At(size_t row) { return pages_[row / kPageEntries][row % kPageEntries]; }
   void Rehash(size_t capacity) {
