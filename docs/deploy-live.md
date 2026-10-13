@@ -4,6 +4,11 @@
 在招商机编译。链路为既有 `cms_gateway → journal → cms_index500ms_mt`，
 不再经过要求最终 END 的离线 exporter。
 
+首次原生部署与真实全天 journal 的验证结果见
+[20261013 验收记录](validation/20261013-live-native-deploy.md)：部署代码 `9a4c6dc`，
+招商机 8 worker 全天追赶 262.123 秒，C++ 峰值 RSS 3.056 GiB。该次用 10/09
+参考文件读取 10/13 journal，验证范围及自动启动状态以记录中的说明为准。
+
 ## 增量部署
 
 ```bash
