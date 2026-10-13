@@ -1,0 +1,738 @@
+{
+  "commit": "fbf436c8a6298bcf040cdf96faf60df353859128",
+  "huatai": {
+    "path": "work/latency-20261013/huatai-20261013-latency.log",
+    "unit": "ms",
+    "threshold_ms": 10.0,
+    "metadata": {
+      "unit": "ms",
+      "source": "two-column close log; no receive timestamps or phase labels"
+    },
+    "filters": {
+      "phase": null,
+      "reason": null,
+      "session": "trading",
+      "include_empty": false
+    },
+    "skipped": {
+      "outside_session": 1206
+    },
+    "groups": [
+      {
+        "mode": "unknown",
+        "phase": "unknown",
+        "reason": "unknown",
+        "windows": 28800,
+        "metrics": {
+          "close_to_write_ms": {
+            "count": 28800,
+            "min": 1.98967,
+            "mean": 5.733397988541666,
+            "max": 128.062,
+            "negative": 0,
+            "over_threshold": 288,
+            "p50": 5.52618,
+            "p95": 7.32131,
+            "p99": 9.98111,
+            "p999": 24.3856
+          },
+          "last_read_to_write_ms": {
+            "count": 0
+          },
+          "last_recv_to_write_ms": {
+            "count": 0
+          }
+        }
+      }
+    ]
+  },
+  "local_ab": {
+    "workers": 8,
+    "window_batch": 1,
+    "runs": [
+      {
+        "mode": "off",
+        "seconds": 5.5850578649988165,
+        "summary": {
+          "read_seconds": 2.35288,
+          "map_seconds": 0.39067,
+          "barrier_seconds": 0.756151,
+          "max_worker_event_seconds": 1.234847,
+          "max_worker_close_seconds": 0.029309,
+          "emitted_endpoints": 28800,
+          "merge_seconds": 1.933075,
+          "sum_worker_peak_pending_payload_bytes": 59507544,
+          "output_mode": "stream",
+          "peak_rss_kib": 573716,
+          "output_capacity_at_eof_bytes": 97469088,
+          "sh_identities_at_eof": 5541819,
+          "sh_identity_capacity_at_eof_bytes": 244252448,
+          "live_orders_at_eof": 2500044,
+          "input_rows": 40271350,
+          "dispatch_seconds": 5.497206,
+          "total_seconds": 5.540363,
+          "events": 17892045,
+          "workers": 8,
+          "spin_waits": 0,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 2950757,
+          "immediate_fill": 2925774,
+          "sz_non_monotonic": 0
+        },
+        "exact_columns": 106,
+        "keys_equal": true
+      },
+      {
+        "mode": "on",
+        "seconds": 3.4504277870000806,
+        "summary": {
+          "read_seconds": 0.190603,
+          "map_seconds": 0.517903,
+          "barrier_seconds": 0.716775,
+          "max_worker_event_seconds": 1.088242,
+          "max_worker_close_seconds": 0.029258,
+          "emitted_endpoints": 28800,
+          "merge_seconds": 1.877355,
+          "sum_worker_peak_pending_payload_bytes": 59507544,
+          "output_mode": "stream",
+          "peak_rss_kib": 576060,
+          "output_capacity_at_eof_bytes": 97469088,
+          "sh_identities_at_eof": 5541819,
+          "sh_identity_capacity_at_eof_bytes": 244252448,
+          "live_orders_at_eof": 2500044,
+          "input_rows": 40271350,
+          "dispatch_seconds": 3.365102,
+          "total_seconds": 3.409122,
+          "events": 17892045,
+          "workers": 8,
+          "spin_waits": 226349,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 2950757,
+          "immediate_fill": 2925774,
+          "sz_non_monotonic": 0
+        },
+        "exact_columns": 106,
+        "keys_equal": true
+      },
+      {
+        "mode": "on",
+        "seconds": 3.26671795600123,
+        "summary": {
+          "read_seconds": 0.201062,
+          "map_seconds": 0.48181,
+          "barrier_seconds": 0.693455,
+          "max_worker_event_seconds": 1.053332,
+          "max_worker_close_seconds": 0.027986,
+          "emitted_endpoints": 28800,
+          "merge_seconds": 1.744579,
+          "sum_worker_peak_pending_payload_bytes": 59507544,
+          "output_mode": "stream",
+          "peak_rss_kib": 576364,
+          "output_capacity_at_eof_bytes": 97469088,
+          "sh_identities_at_eof": 5541819,
+          "sh_identity_capacity_at_eof_bytes": 244252448,
+          "live_orders_at_eof": 2500044,
+          "input_rows": 40271350,
+          "dispatch_seconds": 3.183905,
+          "total_seconds": 3.228132,
+          "events": 17892045,
+          "workers": 8,
+          "spin_waits": 146196,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 2950757,
+          "immediate_fill": 2925774,
+          "sz_non_monotonic": 0
+        },
+        "exact_columns": 106,
+        "keys_equal": true
+      },
+      {
+        "mode": "off",
+        "seconds": 3.262599517001945,
+        "summary": {
+          "read_seconds": 0.174303,
+          "map_seconds": 0.465182,
+          "barrier_seconds": 0.702532,
+          "max_worker_event_seconds": 1.034147,
+          "max_worker_close_seconds": 0.026925,
+          "emitted_endpoints": 28800,
+          "merge_seconds": 1.778348,
+          "sum_worker_peak_pending_payload_bytes": 59507544,
+          "output_mode": "stream",
+          "peak_rss_kib": 574584,
+          "output_capacity_at_eof_bytes": 97469088,
+          "sh_identities_at_eof": 5541819,
+          "sh_identity_capacity_at_eof_bytes": 244252448,
+          "live_orders_at_eof": 2500044,
+          "input_rows": 40271350,
+          "dispatch_seconds": 3.17958,
+          "total_seconds": 3.222769,
+          "events": 17892045,
+          "workers": 8,
+          "spin_waits": 204983,
+          "over_deduct": 0,
+          "d_unknown": 0,
+          "unknown_trade_ref": 0,
+          "late_passive_ref": 0,
+          "agg_skip": 0,
+          "crossed_book": 2950757,
+          "immediate_fill": 2925774,
+          "sz_non_monotonic": 0
+        },
+        "exact_columns": 106,
+        "keys_equal": true
+      }
+    ]
+  },
+  "local_latency": {
+    "path": "work/latency-20261013/local-ab/2-on/latency.csv",
+    "unit": "ms",
+    "threshold_ms": 10.0,
+    "metadata": {
+      "schema": "cms-latency-v1",
+      "unit": "ms",
+      "factor_clock": "exch",
+      "mode": "dtype_replay",
+      "latency_log": "endpoint_hms close_to_write_ms",
+      "write_boundary": "Arrow record batch write and Flush returned; no fsync",
+      "receive_scope": "latest gateway recv_ns among accepted constituent events in this right-closed exchange window",
+      "read_boundary": "journal frame observed committed, before hash/decode; DTYPE read completion per input batch",
+      "phase": "catchup until first journal idle; tail afterwards; replay for historical modes",
+      "empty_window": "receive/read latency absent; close latency still measured",
+      "clock_warning": "receive latency uses wall clock; signed values retained; replay receive latency absent"
+    },
+    "filters": {
+      "phase": null,
+      "reason": "watermark",
+      "session": "trading",
+      "include_empty": false
+    },
+    "skipped": {
+      "phase_or_reason": 28201
+    },
+    "groups": [
+      {
+        "mode": "dtype_replay",
+        "phase": "replay",
+        "reason": "watermark",
+        "windows": 599,
+        "metrics": {
+          "close_to_write_ms": {
+            "count": 599,
+            "min": 1.51428,
+            "mean": 2.6965533706176963,
+            "max": 21.536288,
+            "negative": 0,
+            "over_threshold": 1,
+            "p50": 2.605514,
+            "p95": 3.776188,
+            "p99": 4.595818,
+            "p999": 5.484088
+          },
+          "last_read_to_write_ms": {
+            "count": 599,
+            "min": 1.83682,
+            "mean": 3.3630730317195323,
+            "max": 22.517467,
+            "negative": 0,
+            "over_threshold": 1,
+            "p50": 3.258194,
+            "p95": 4.501897,
+            "p99": 5.236825,
+            "p999": 6.095112
+          },
+          "last_recv_to_write_ms": {
+            "count": 0
+          }
+        },
+        "distinct_closes": 391,
+        "distinct_flushes": 391
+      }
+    ]
+  },
+  "gy_dev": {
+    "commit": "fbf436c8a6298bcf040cdf96faf60df353859128",
+    "workers": 8,
+    "input": "/tmp/par_t8.bin",
+    "input_bytes": 68570400648,
+    "input_kind": "pre-exported DTYPE; unpaced replay",
+    "command": [
+      "/data/users/linwei/Code/zs_l2/cms_rtf_latency_20261013/build/cms_index500ms_mt",
+      "--input",
+      "/tmp/par_t8.bin",
+      "--thresh",
+      "/data/users/linwei/cms_work/latency_20261013/full8/threshold.bin",
+      "--ref",
+      "/data/users/linwei/cms_work/latency_20261013/full8/reference.bin",
+      "--day",
+      "20261009",
+      "--workers",
+      "8",
+      "--window-batch",
+      "1",
+      "--output-mode",
+      "stream",
+      "--work-dir",
+      "/data/users/linwei/cms_work/latency_20261013/full8",
+      "--out",
+      "/data/users/linwei/cms_work/latency_20261013/full8/factors.arrow",
+      "--latency",
+      "on"
+    ],
+    "elapsed": 208.52649511792697,
+    "kernel": {
+      "read_seconds": 38.298216,
+      "map_seconds": 34.607179,
+      "barrier_seconds": 98.422363,
+      "max_worker_event_seconds": 69.672308,
+      "max_worker_close_seconds": 5.214019,
+      "emitted_endpoints": 28800,
+      "merge_seconds": 30.886352,
+      "sum_worker_peak_pending_payload_bytes": 134962712,
+      "output_mode": "stream",
+      "peak_rss_kib": 3333252,
+      "output_capacity_at_eof_bytes": 137001728,
+      "sh_identities_at_eof": 64886586,
+      "sh_identity_capacity_at_eof_bytes": 2840256512,
+      "live_orders_at_eof": 4172008,
+      "input_rows": 535706255,
+      "dispatch_seconds": 207.856603,
+      "total_seconds": 208.069178,
+      "events": 227956156,
+      "workers": 8,
+      "spin_waits": 7209,
+      "over_deduct": 0,
+      "d_unknown": 0,
+      "unknown_trade_ref": 0,
+      "late_passive_ref": 0,
+      "agg_skip": 0,
+      "crossed_book": 40687629,
+      "immediate_fill": 40653660,
+      "sz_non_monotonic": 0
+    },
+    "latency": {
+      "path": "/data/users/linwei/cms_work/latency_20261013/full8/latency.csv",
+      "unit": "ms",
+      "threshold_ms": 10.0,
+      "metadata": {
+        "schema": "cms-latency-v1",
+        "unit": "ms",
+        "factor_clock": "exch",
+        "mode": "dtype_replay",
+        "latency_log": "endpoint_hms close_to_write_ms",
+        "write_boundary": "Arrow record batch write and Flush returned; no fsync",
+        "receive_scope": "latest gateway recv_ns among accepted constituent events in this right-closed exchange window",
+        "read_boundary": "journal frame observed committed, before hash/decode; DTYPE read completion per input batch",
+        "phase": "catchup until first journal idle; tail afterwards; replay for historical modes",
+        "empty_window": "receive/read latency absent; close latency still measured",
+        "clock_warning": "receive latency uses wall clock; signed values retained; replay receive latency absent"
+      },
+      "filters": {
+        "phase": null,
+        "reason": null,
+        "session": "trading",
+        "include_empty": false
+      },
+      "skipped": {},
+      "groups": [
+        {
+          "mode": "dtype_replay",
+          "phase": "replay",
+          "reason": "watermark",
+          "windows": 28439,
+          "metrics": {
+            "close_to_write_ms": {
+              "count": 28439,
+              "min": 2.687644,
+              "mean": 17.460707449523426,
+              "max": 1640.568334,
+              "negative": 0,
+              "over_threshold": 5387,
+              "p50": 6.974443,
+              "p95": 24.530536,
+              "p99": 329.705965,
+              "p999": 946.367512
+            },
+            "last_read_to_write_ms": {
+              "count": 28439,
+              "min": 3.925688,
+              "mean": 22.459226667534054,
+              "max": 1642.315838,
+              "negative": 0,
+              "over_threshold": 9253,
+              "p50": 8.529695,
+              "p95": 37.830631,
+              "p99": 446.74199,
+              "p999": 1119.798357
+            },
+            "last_recv_to_write_ms": {
+              "count": 0
+            }
+          },
+          "distinct_closes": 7879,
+          "distinct_flushes": 7879
+        },
+        {
+          "mode": "dtype_replay",
+          "phase": "replay",
+          "reason": "eof",
+          "windows": 361,
+          "metrics": {
+            "close_to_write_ms": {
+              "count": 361,
+              "min": 97.938448,
+              "mean": 97.93844800000056,
+              "max": 97.938448,
+              "negative": 0,
+              "over_threshold": 361,
+              "p50": 97.938448,
+              "p95": 97.938448,
+              "p99": 97.938448,
+              "p999": 97.938448
+            },
+            "last_read_to_write_ms": {
+              "count": 361,
+              "min": 98.218186,
+              "mean": 98.24190770637028,
+              "max": 100.35907,
+              "negative": 0,
+              "over_threshold": 361,
+              "p50": 98.218186,
+              "p95": 98.218186,
+              "p99": 98.218186,
+              "p999": 100.35907
+            },
+            "last_recv_to_write_ms": {
+              "count": 0
+            }
+          },
+          "distinct_closes": 1,
+          "distinct_flushes": 1
+        }
+      ]
+    },
+    "check": {
+      "rows": 115200,
+      "keys_equal": true,
+      "keys_unique": true,
+      "exact_columns": 106,
+      "total_columns": 106
+    },
+    "files": {
+      "latency.log": 640098,
+      "latency.meta.json": 695,
+      "summary.json": 790,
+      "command.json": 566,
+      "stderr.log": 0,
+      "time.txt": 1202,
+      "factors.arrow": 93318464,
+      "latency.csv": 5056636,
+      "reference.bin": 64844,
+      "threshold.bin": 36000
+    }
+  },
+  "target": {
+    "deployment": {
+      "commit": "fbf436c8a6298bcf040cdf96faf60df353859128",
+      "built_at": "2026-10-13T21:06:17.204098",
+      "build_seconds": 41.740124375999585,
+      "source": "/data/cms/rtf/sources/fbf436c8a6298bcf040cdf96faf60df353859128",
+      "python_root": "/data/cms/archive/releases/cms-archive-0.2.4/python",
+      "log": "/data/cms/rtf/log/build-fbf436c8a6298bcf040cdf96faf60df353859128.log",
+      "checks": "ctest+python_unittest"
+    },
+    "run": {
+      "pid": 18459,
+      "start_ticks": "1182538",
+      "day": "20261013",
+      "prefix": "/data/cms/rtf",
+      "source": "/data/cms/rtf/sources/fbf436c8a6298bcf040cdf96faf60df353859128",
+      "commit": "fbf436c8a6298bcf040cdf96faf60df353859128",
+      "attempt": "/data/cms/rtf/data/index_500ms/20261013/runs/210650-18459",
+      "kernel_pid": 18483,
+      "exit_code": 0,
+      "health": {
+        "status": "completed",
+        "day": "20261013",
+        "pid": 18483,
+        "emitted_endpoints": 28800,
+        "last_endpoint_ms": 54000000,
+        "clock_ms": 76266153,
+        "source_clock_ns": 1791897066153021262,
+        "records": 40728279,
+        "input_rows": 500061765,
+        "constituent_events": 207866215,
+        "late_events": 0,
+        "sessions": 1,
+        "unclean_restarts": 0,
+        "input_incomplete": false,
+        "journal_ended": true,
+        "clock_inversions": 0,
+        "page": 314,
+        "caught_up": true,
+        "peak_rss_kib": 3205620,
+        "arrow_bytes": 201819152,
+        "latency_enabled": true,
+        "full_grid": true
+      }
+    },
+    "kernel": {
+      "read_seconds": 195.778792,
+      "map_seconds": 59.843763,
+      "barrier_seconds": 10.954692,
+      "max_worker_event_seconds": 26.57122,
+      "max_worker_close_seconds": 5.200849,
+      "emitted_endpoints": 28800,
+      "merge_seconds": 33.899563,
+      "sum_worker_peak_pending_payload_bytes": 117202128,
+      "output_mode": "stream",
+      "peak_rss_kib": 3205620,
+      "output_capacity_at_eof_bytes": 125094656,
+      "sh_identities_at_eof": 59785052,
+      "sh_identity_capacity_at_eof_bytes": 2615277056,
+      "live_orders_at_eof": 4374648,
+      "input_rows": 500061765,
+      "dispatch_seconds": 255.719484,
+      "total_seconds": 255.921909,
+      "events": 207866215,
+      "workers": 8,
+      "spin_waits": 0,
+      "over_deduct": 0,
+      "d_unknown": 0,
+      "unknown_trade_ref": 0,
+      "late_passive_ref": 0,
+      "agg_skip": 0,
+      "crossed_book": 35837552,
+      "immediate_fill": 36376518,
+      "sz_non_monotonic": 0
+    },
+    "check": {
+      "exact_columns": 106,
+      "keys_equal": true,
+      "keys_unique": true,
+      "identical_arrow_sha256": true
+    },
+    "arrow_sha256": "6a8b1ad585cbabeb9b3a6da153a39868385771707a828dca8369aae81d853b75",
+    "latency": {
+      "path": "/data/cms/rtf/data/index_500ms/20261013/runs/210650-18459/latency.csv",
+      "unit": "ms",
+      "threshold_ms": 10.0,
+      "metadata": {
+        "schema": "cms-latency-v1",
+        "unit": "ms",
+        "factor_clock": "exch",
+        "mode": "journal_follow_wall",
+        "latency_log": "endpoint_hms close_to_write_ms",
+        "write_boundary": "Arrow record batch write and Flush returned; no fsync",
+        "receive_scope": "latest gateway recv_ns among accepted constituent events in this right-closed exchange window",
+        "read_boundary": "journal frame observed committed, before hash/decode; DTYPE read completion per input batch",
+        "phase": "catchup until first journal idle; tail afterwards; replay for historical modes",
+        "empty_window": "receive/read latency absent; close latency still measured",
+        "clock_warning": "receive latency uses wall clock; signed values retained; replay receive latency absent"
+      },
+      "filters": {
+        "phase": null,
+        "reason": null,
+        "session": "trading",
+        "include_empty": false
+      },
+      "skipped": {},
+      "groups": [
+        {
+          "mode": "journal_follow_wall",
+          "phase": "catchup",
+          "reason": "watermark",
+          "windows": 28438,
+          "metrics": {
+            "close_to_write_ms": {
+              "count": 28438,
+              "min": 1.070904,
+              "mean": 1.4047780488782615,
+              "max": 11.124624,
+              "negative": 0,
+              "over_threshold": 16,
+              "p50": 1.372528,
+              "p95": 1.556393,
+              "p99": 2.058829,
+              "p999": 6.534691
+            },
+            "last_read_to_write_ms": {
+              "count": 28438,
+              "min": 2.598465,
+              "mean": 5.977688109536536,
+              "max": 141.658518,
+              "negative": 0,
+              "over_threshold": 2395,
+              "p50": 5.027662,
+              "p95": 11.660379,
+              "p99": 18.903112,
+              "p999": 42.501232
+            },
+            "last_recv_to_write_ms": {
+              "count": 28438,
+              "min": 22445469.195262,
+              "mean": 32185655.005947974,
+              "max": 41770268.735403,
+              "negative": 0,
+              "over_threshold": 28438,
+              "p50": 34852356.442977,
+              "p95": 41133575.923909,
+              "p99": 41680477.919787,
+              "p999": 41765171.268456
+            }
+          },
+          "distinct_closes": 28316,
+          "distinct_flushes": 28316
+        },
+        {
+          "mode": "journal_follow_wall",
+          "phase": "catchup",
+          "reason": "am_timer",
+          "windows": 1,
+          "metrics": {
+            "close_to_write_ms": {
+              "count": 1,
+              "min": 1.418912,
+              "mean": 1.418912,
+              "max": 1.418912,
+              "negative": 0,
+              "over_threshold": 0,
+              "p50": 1.418912,
+              "p95": 1.418912,
+              "p99": 1.418912,
+              "p999": 1.418912
+            },
+            "last_read_to_write_ms": {
+              "count": 1,
+              "min": 3.197718,
+              "mean": 3.197718,
+              "max": 3.197718,
+              "negative": 0,
+              "over_threshold": 0,
+              "p50": 3.197718,
+              "p95": 3.197718,
+              "p99": 3.197718,
+              "p999": 3.197718
+            },
+            "last_recv_to_write_ms": {
+              "count": 1,
+              "min": 34764091.697932,
+              "mean": 34764091.697932,
+              "max": 34764091.697932,
+              "negative": 0,
+              "over_threshold": 1,
+              "p50": 34764091.697932,
+              "p95": 34764091.697932,
+              "p99": 34764091.697932,
+              "p999": 34764091.697932
+            }
+          },
+          "distinct_closes": 1,
+          "distinct_flushes": 1
+        },
+        {
+          "mode": "journal_follow_wall",
+          "phase": "catchup",
+          "reason": "pm_timer",
+          "windows": 361,
+          "metrics": {
+            "close_to_write_ms": {
+              "count": 361,
+              "min": 103.762787,
+              "mean": 103.762787,
+              "max": 103.762787,
+              "negative": 0,
+              "over_threshold": 361,
+              "p50": 103.762787,
+              "p95": 103.762787,
+              "p99": 103.762787,
+              "p999": 103.762787
+            },
+            "last_read_to_write_ms": {
+              "count": 361,
+              "min": 104.647261,
+              "mean": 105.12888149307479,
+              "max": 109.86644,
+              "negative": 0,
+              "over_threshold": 361,
+              "p50": 104.887806,
+              "p95": 106.184493,
+              "p99": 108.384619,
+              "p999": 108.939536
+            },
+            "last_recv_to_write_ms": {
+              "count": 361,
+              "min": 22257516.604237,
+              "mean": 22257528.02368489,
+              "max": 22257652.527645,
+              "negative": 0,
+              "over_threshold": 361,
+              "p50": 22257521.682585,
+              "p95": 22257547.960268,
+              "p99": 22257613.072028,
+              "p999": 22257628.098425
+            }
+          },
+          "distinct_closes": 1,
+          "distinct_flushes": 1
+        }
+      ]
+    },
+    "files": {
+      "thresholds.bin": 36000,
+      "live-status.json": 469,
+      "kernel.summary.json": 788,
+      "index_500ms_exch.arrow": 201819152,
+      "latency.csv": 5572637,
+      "references.json": 735,
+      "run.json": 328,
+      "kernel.log": 0,
+      "latency.log": 634338,
+      "latency.meta.json": 702,
+      "reference.bin": 64844
+    },
+    "validations": {
+      "csv_rows": 28800,
+      "timestamps_recomputed": true,
+      "per_arrow_flush_matched": true,
+      "cpp_tests": 6,
+      "python_tests": 54,
+      "target_test_success": true
+    }
+  },
+  "gy_dev_environment_during_replay": {
+    "loadavg": [
+      734.02,
+      538.53,
+      339.26
+    ],
+    "mem_total_kib": 2100947692,
+    "mem_available_kib": 1853671020,
+    "swap_total_kib": 8388604,
+    "swap_free_kib": 492,
+    "kernel_nice": 10
+  },
+  "scope": {
+    "trading_live_receive_latency_measured": false,
+    "huatai_operation": "read only source and existing logs",
+    "target_run": "after-hours journal follow catchup using 20261009 references",
+    "local_run": "20261009 before 09:35; pre-exported DTYPE unpaced",
+    "gy_dev_run": "20261009 whole day; pre-exported DTYPE unpaced; high host load",
+    "units": "milliseconds",
+    "output_clock": "exch only",
+    "close_latency_boundary": "before worker close/barrier -> successful Arrow record batch write+Flush; no fsync",
+    "receive_latency_boundary": "max gateway recv_ns of eligible current-window constituents -> successful Arrow write+Flush; wall clock"
+  }
+}

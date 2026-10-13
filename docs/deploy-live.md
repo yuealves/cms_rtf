@@ -120,6 +120,8 @@ python3 /data/cms/rtf/current/scripts/summarize_latency.py \
 `last_recv_to_write_ms` 留空，不能拿历史 recv_ns 减当前时间来报告实时延迟。
 catchup 阶段的接收延迟可能包含历史数据年龄；排查时可去掉 phase 过滤查看。
 Arrow flush 表示完整 batch 已可读取，没有额外 fsync；详见 design.md 的计时边界。
+8 worker 的 gy_dev/招商验证、华泰盘中对照和日志开销见
+[延迟日志验收记录](validation/20261013-latency.md)。
 
 `crontab.example` 只提供 09:12 启动示例；部署不会自动修改 crontab 或启动业务。
 实际安装定时任务须保留网关原有条目，并按工作区规则先备份。
