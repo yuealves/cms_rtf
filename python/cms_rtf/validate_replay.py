@@ -40,6 +40,11 @@ def exact_factors(a, b):
         raise ValueError('factor column catalog/order mismatch')
     if not a.schema.equals(b.schema, check_metadata=False):
         raise ValueError('factor schema mismatch')
+    age_key = b'cms_rtf.local_age_semantics'
+    legacy_age = b'wall_time_v1'
+    if ((a.schema.metadata or {}).get(age_key, legacy_age) !=
+            (b.schema.metadata or {}).get(age_key, legacy_age)):
+        raise ValueError('local snapshot_age_seconds semantics mismatch (wall time vs trading time)')
     if a.num_rows != b.num_rows:
         raise ValueError('factor row count mismatch')
     keys_equal = all(a[k].equals(b[k]) for k in ('datetime', 'code'))

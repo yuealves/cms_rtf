@@ -225,6 +225,47 @@ class LiveJournalTest(unittest.TestCase):
         proc.send_signal(signal.SIGTERM); _, err = proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 0, err)
 
+    def test_local_age_lunch_overlap_weighting_and_exchange_clock(self):
+        w = self.writer
+        w.append(2, 41398000, b'{}')
+        # Both stocks have valid two-sided books, with equal index weights.
+        for seq, ms, symbol, side, px in [
+                (1, 41398000, b'000001', 49, 100000),
+                (2, 41398100, b'000001', 50, 100100),
+                (3, 41398200, b'000002', 49, 100000),
+                (4, 41398300, b'000002', 50, 100100),
+                (5, 41399000, b'000001', 49, 100000),
+                (6, 44100000, b'000002', 49, 100000),  # 12:15 receive update
+                (7, 46806100, b'000002', 49, 100000)]:
+            w.append(1, ms, order(seq, ms, side=side, price=px, symbol=symbol))
+        w.append(3, 54060001)
+        w.append(4, 55800000)
+        previous = None
+        for workers in (1, 8):
+            out = self.root / f'lunch{workers}'
+            result = subprocess.run(self.command(out, 'replay', workers), capture_output=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            local = pa.ipc.open_stream(out / 'factors_local.arrow').read_all()
+            exch = pa.ipc.open_stream(out / 'factors.arrow').read_all()
+            self.assertEqual(local.schema.metadata[b'cms_rtf.local_age_semantics'],
+                             b'trading_time_excluding_lunch_v2')
+            self.assertNotIn(b'cms_rtf.local_age_semantics', exch.schema.metadata or {})
+            def values(table, stamp, column):
+                times = table['datetime'].to_numpy()
+                return table[column].to_numpy()[times == np.datetime64('2026-10-09T' + stamp)]
+            # 13:00:06: stock1 age=7, stock2 age=6, index age=6.5 seconds.
+            np.testing.assert_array_equal(values(local, '13:00:06', 'snapshot_age_seconds'), [6.5] * 4)
+            # Exchange ages still include lunch: (5407 + 2706) / 2.
+            np.testing.assert_array_equal(values(exch, '13:00:06', 'snapshot_age_seconds'), [4056.5] * 4)
+            np.testing.assert_array_equal(values(local, '13:00:06', 'snapshot_fresh_weight_500ms'), [0.] * 4)
+            # PM update changes only stock2's reception age, while stock1 keeps aging.
+            np.testing.assert_allclose(values(local, '13:00:06.500', 'snapshot_age_seconds'), [3.95] * 4, rtol=1e-7)
+            np.testing.assert_array_equal(values(local, '13:00:06.500', 'snapshot_fresh_weight_500ms'), [.5] * 4)
+            np.testing.assert_allclose(values(local, '13:00:07', 'snapshot_age_seconds'), [4.45] * 4, rtol=1e-7)
+            if previous is not None:
+                self.assertEqual(exact_factors(previous, local)['exact_columns'], 106)
+            previous = local
+
     def test_integrity_errors_and_missing_final_end(self):
         self.opening()
         out = self.root / 'missing_end'

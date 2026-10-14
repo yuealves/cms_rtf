@@ -236,7 +236,8 @@ int Run(int argc, char** argv) {
       }
       if (std::filesystem::absolute(local_output).lexically_normal() == std::filesystem::absolute(output).lexically_normal())
         throw std::runtime_error("local and exchange outputs require distinct paths");
-      local_arrow = std::make_unique<aggregation::ArrowOutput>(local_output, aggregation::DayStart(day), follow, true);
+      local_arrow = std::make_unique<aggregation::ArrowOutput>(local_output, aggregation::DayStart(day), follow, true,
+          aggregation::ArrowOutput::AgeClock::LocalTradingTime);
     }
     if (track_latency) {
       auto directory = std::filesystem::path(output).parent_path();
@@ -530,7 +531,7 @@ int Run(int argc, char** argv) {
         if (found == states.end()) continue;
         const auto& local = *found->second->local();
         for (int idx = 0; idx < 4; ++idx) if (weights[idx] > 0) {
-          aggregation::AddBookValueAtAge(&local.book, local.ret, local.age, weights[idx], acc[idx]);
+          aggregation::AddBookValueAtAge(&local.book, local.ret, local.age, local.fresh, weights[idx], acc[idx]);
           aggregation::AddFlowValue(local.output, weights[idx], acc[idx]);
         }
       }

@@ -45,6 +45,16 @@ class ReplayValidationTest(unittest.TestCase):
         table = pa.table(cols)
         self.assertFalse(exact_factors(table, table)['keys_unique'])
 
+    def test_local_age_semantics_must_match(self):
+        cols = {'datetime': pa.array([1], type=pa.timestamp('us')), 'code': ['A']}
+        cols.update({n: pa.array([1], type=pa.float32()) for n in COLUMN_NAMES})
+        legacy = pa.table(cols)
+        trading = legacy.replace_schema_metadata({
+            b'cms_rtf.local_age_semantics': b'trading_time_excluding_lunch_v2'})
+        with self.assertRaisesRegex(ValueError, 'snapshot_age_seconds semantics mismatch'):
+            exact_factors(legacy, trading)
+        self.assertEqual(exact_factors(trading, trading)['exact_columns'], 106)
+
 
 if __name__ == '__main__':
     unittest.main()

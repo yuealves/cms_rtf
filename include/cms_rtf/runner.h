@@ -67,6 +67,7 @@ class SymbolRunner {
     int64_t last_act_ns = -1, cached_event_ns = -1;
     double previous_mid = std::numeric_limits<double>::quiet_NaN();
     double ret = std::numeric_limits<double>::quiet_NaN(), age = 0;
+    bool fresh = false;  // Actual receive-time freshness, independent of lunch-adjusted age.
   };
   void EnableLocal(double xl, double m, int32_t closed_endpoint = -1) {
     local_ = std::make_unique<LocalState>(xl, m);
@@ -96,8 +97,19 @@ class SymbolRunner {
       s.previous_mid = s.book.mid;
       s.cached_event_ns = s.last_act_ns;
     }
-    s.age = s.last_act_ns >= 0 ? (double(int64_t(endpoint) * 1000000) - double(s.last_act_ns)) / 1e9
-                              : std::numeric_limits<double>::quiet_NaN();
+    s.age = std::numeric_limits<double>::quiet_NaN();
+    s.fresh = false;
+    if (s.last_act_ns >= 0) {
+      const int64_t endpoint_ns = int64_t(endpoint) * 1000000;
+      const int64_t elapsed_ns = endpoint_ns - s.last_act_ns;
+      s.fresh = elapsed_ns < 500000000;
+      // CMS local-age v2: subtract only the lunch overlap, before weighting.
+      // Receive events during lunch still update the book and its last action.
+      const int64_t lunch_ns = std::max(int64_t{0},
+          std::min(endpoint_ns, int64_t(kPmOpenMs) * 1000000) -
+          std::max(s.last_act_ns, int64_t(kAmCloseMs) * 1000000));
+      s.age = double(elapsed_ns - lunch_ns) / 1e9;
+    }
   }
 
   void OnEvent(const EventRec& ev, int64_t local_ns = -1) {

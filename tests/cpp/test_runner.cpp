@@ -72,8 +72,52 @@ static void local_clock_boundaries() {
   check(unseen.local()->output.bases[2] == 100);
 }
 
+static void local_age_excludes_only_lunch() {
+  const auto grid = BuildGrid();
+  std::vector<BookRec> books;
+  std::vector<FlowRec> flows;
+  SymbolRunner runner(1, 100000, 20000, grid, &books, &flows);
+  runner.EnableLocal(100000, 20000);
+  runner.CloseLocal(kAmOpenMs);
+  check(std::isnan(runner.local()->age) && !runner.local()->fresh);
+  EventRec ev{}; ev.symbol = 1; ev.channel = 1; ev.order_type = kSzOrderLimit;
+  ev.time_ms = kAmCloseMs - 1000; ev.volume = 100;
+  ev.ref1 = 1; ev.side = kSideBuy; ev.px_tick = 100000;
+  const int64_t last_am = int64_t(kAmCloseMs - 1000) * 1000000;
+  runner.OnEvent(ev, last_am);
+  runner.CloseLocal(kAmCloseMs);
+  check(runner.local()->age == 1.0 && !runner.local()->fresh);
+  runner.CloseLocal(kPmOpenMs + 500);
+  check(runner.local()->age == 1.5 && !runner.local()->fresh);
+  runner.CloseLocal(kPmOpenMs + 6000);  // Reused cached book must keep aging.
+  check(runner.local()->age == 7.0 && !runner.local()->fresh);
+
+  // Receive during the break: subtract the remaining break, not a fixed 5400s.
+  ev.ref1 = 2; ev.time_ms = kAmCloseMs + 2700000;
+  runner.OnEvent(ev, int64_t(ev.time_ms) * 1000000);
+  runner.CloseLocal(kPmOpenMs + 6500);
+  check(runner.local()->age == 6.5 && !runner.local()->fresh);
+  ev.ref1 = 3; ev.time_ms = kPmOpenMs + 7000;
+  runner.OnEvent(ev, int64_t(ev.time_ms) * 1000000 + 1);
+  runner.CloseLocal(kPmOpenMs + 7500);
+  check(runner.local()->age == .499999999 && runner.local()->fresh);
+  runner.CloseLocal(kPmOpenMs + 8000);
+  check(runner.local()->age == .999999999 && !runner.local()->fresh);
+
+  SymbolRunner at_boundary(2, 100000, 20000, grid, &books, &flows);
+  at_boundary.EnableLocal(100000, 20000);
+  ev.symbol = 2; ev.time_ms = kAmCloseMs;
+  at_boundary.OnEvent(ev, int64_t(kAmCloseMs) * 1000000);
+  // Even if called at the PM boundary, zero trading age is not fresh reception.
+  at_boundary.CloseLocal(kPmOpenMs);
+  check(at_boundary.local()->age == 0.0 && !at_boundary.local()->fresh);
+  at_boundary.CloseLocal(kPmOpenMs + 500);
+  check(at_boundary.local()->age == .5 && !at_boundary.local()->fresh);
+}
+
 int main() {
   local_clock_boundaries();
+  local_age_excludes_only_lunch();
   // Includes exact endpoints, backwards timestamps, lunch, post-close updates,
   // and re-entry after post-close: the frozen capture must survive those updates.
   const std::vector<int32_t> times = {

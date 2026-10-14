@@ -120,9 +120,10 @@ int64_t DayStart(const std::string& day) {
 }
 
 void AddBookValue(const BookRec* r, double ret, int32_t ep, double w, Endpoint& a) {
-  AddBookValueAtAge(r, ret, r ? (static_cast<int64_t>(ep) - r->act_ms) / 1000.0 : 0, w, a);
+  const double age = r ? (static_cast<int64_t>(ep) - r->act_ms) / 1000.0 : 0;
+  AddBookValueAtAge(r, ret, age, age < 0.5, w, a);
 }
-void AddBookValueAtAge(const BookRec* r, double ret, double age, double w, Endpoint& a) {
+void AddBookValueAtAge(const BookRec* r, double ret, double age, bool fresh, double w, Endpoint& a) {
   if (!r || !std::isfinite(r->mid) || r->act_ms < 0) return;
   for (int c = 0; c < 31; ++c) if (std::isfinite(r->feat[c])) {
     a.num[c] += w * r->feat[c]; a.den[c] += w;
@@ -130,7 +131,7 @@ void AddBookValueAtAge(const BookRec* r, double ret, double age, double w, Endpo
   if (std::isfinite(ret)) { a.num[31] += w * ret; a.den[31] += w; }
   a.valid_weight += w;
   a.age += w * age;
-  if (age < 0.5) a.fresh += w;
+  if (fresh) a.fresh += w;
 }
 void AddFlowValue(const FlowRec& r, double w, Endpoint& a) {
   const auto* b = r.bases;
@@ -181,12 +182,16 @@ struct ArrowOutput::Impl {
   std::vector<int32_t> endpoints;
   std::vector<WindowRows> rows;
   bool live, huatai_cutoffs;
-  Impl(const std::string& path, int64_t day, bool publish_live, bool flush_on_cutoff) : destination(path),
+  Impl(const std::string& path, int64_t day, bool publish_live, bool flush_on_cutoff, AgeClock age_clock) : destination(path),
       temporary(publish_live ? path : path + ".tmp." + std::to_string(getpid())), day0(day), live(publish_live), huatai_cutoffs(flush_on_cutoff) {
     std::vector<std::shared_ptr<arrow::Field>> fields = {
       arrow::field("datetime", arrow::timestamp(arrow::TimeUnit::MICRO)), arrow::field("code", arrow::utf8())};
     for (const char* name : kColumnNames) fields.push_back(arrow::field(name, arrow::float32()));
     schema = arrow::schema(fields);
+    if (age_clock == AgeClock::LocalTradingTime) {
+      schema = schema->WithMetadata(arrow::key_value_metadata(
+          {"cms_rtf.local_age_semantics"}, {"trading_time_excluding_lunch_v2"}));
+    }
     if (live) {
       const int fd = ::open(temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
       if (fd < 0) throw std::runtime_error("live output must be a new writable path: " + temporary);
@@ -206,8 +211,8 @@ struct ArrowOutput::Impl {
     }
   }
 };
-ArrowOutput::ArrowOutput(const std::string& path, int64_t day0, bool live, bool huatai_cutoffs)
-    : impl_(std::make_unique<Impl>(path, day0, live, huatai_cutoffs)) {}
+ArrowOutput::ArrowOutput(const std::string& path, int64_t day0, bool live, bool huatai_cutoffs, AgeClock age_clock)
+    : impl_(std::make_unique<Impl>(path, day0, live, huatai_cutoffs, age_clock)) {}
 ArrowOutput::~ArrowOutput() = default;
 uint64_t ArrowOutput::rows() const { return impl_->count; }
 void ArrowOutput::Append(int32_t ep, const WindowRows& rows) {
