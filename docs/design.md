@@ -65,7 +65,19 @@ local、再 Flush exch，第二次 Flush 返回后立即结束计时，然后写
 删除原有逐窗口 read/recv 时间槽、每帧计时、latency.csv/meta.json 的生成。
 `scripts/summarize_latency.py <目录或 latency.log>` 默认只统计交易时段；旧 CSV
 只保留显式读取能力以复核历史报告。历史回放和线上必须各自统计，日志本身不再
-附带 phase 标签。部署的 run 隔离、拒绝覆盖旧输出和状态回执继续保留。
+附带 phase 标签。原生入口拒绝覆盖旧输出；服务重启时先保留上一份输出，
+再在固定日期目录重新生成，运行状态和参考数据回执单独保存。
+
+### 每日输出目录（2026-10-14）
+
+服务配置 `output_root=/data/cms/data`，两路 Arrow 和 `latency.log` 直接写入
+`/data/cms/data/index_500ms/YYYYMMDD/`，不再要求消费者进入 runs/current。
+每次运行的参考二进制、回执、健康状态和内核日志仍隔离在
+`/data/cms/rtf/run/history/YYYYMMDD/<时间-PID>/`，status 返回 `output_dir` 和
+`attempt` 两个位置。当天重启先将既有三份输出移至
+`/data/cms/data/index_500ms/.restarts/YYYYMMDD/<新运行时间-PID>/`，然后从当日
+journal 首帧重建。追赶期间日期目录是新进程逐步生成的前缀，消费者需重新打开
+文件并结合 `caught_up` 判断是否追平。不同日期互不移动，旧布局历史文件保留原位。
 
 ### 内存与验收
 

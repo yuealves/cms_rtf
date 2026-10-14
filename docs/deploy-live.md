@@ -73,6 +73,10 @@ APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap
 沿用现有不晚于交易日的最近文件规则；实际所用文件、hash 与成分股数写入
 每次运行的 `references.json`，缺失或缺成分阈值直接失败。
 
+招商当前配置使用 `weights_dir=/data/shenrun/assets/index/weight`、
+`threshold_dir=/data/shenrun/163-raw-minute`、`output_root=/data/cms/data`。
+升级保留外部配置；既有安装需要把 `output_root` 改成上述路径。
+
 ```bash
 /data/cms/rtf/bin/start.sh
 /data/cms/rtf/bin/status.sh
@@ -88,16 +92,20 @@ APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap
 输出为 local/exch 两个最终 Arrow stream（各 106 Float32 因子 + 两个键），没有逐股中间文件：
 
 ```
-data/index_500ms/YYYYMMDD/runs/<时间-PID>/index_500ms_exch.arrow
-data/index_500ms/YYYYMMDD/runs/<时间-PID>/index_500ms_local.arrow
-data/index_500ms/YYYYMMDD/runs/<时间-PID>/latency.log
-data/index_500ms/YYYYMMDD/current -> runs/<时间-PID>
+/data/cms/data/index_500ms/YYYYMMDD/index_500ms_exch.arrow
+/data/cms/data/index_500ms/YYYYMMDD/index_500ms_local.arrow
+/data/cms/data/index_500ms/YYYYMMDD/latency.log
 ```
 
-实时模式逐批 flush，同名 `live-status.json` 提供已发布端点、source clock、
+每次运行的参考数据、回执、内核日志及 `live-status.json` 单独存于
+`/data/cms/rtf/run/history/YYYYMMDD/<时间-PID>/`；status 返回输出 `output_dir`
+与运行记录 `attempt`。实时模式逐批 flush，`live-status.json` 提供已发布端点、source clock、
 输入/迟到/中断计数、进程 RSS 峰值和状态。读取正在增长的 Arrow 时，消费者必须
 按完整 record batch 读取并等待尾部，不将暂时没有字节视为全天 EOF。
-重启创建新 run，追平并发布首批后再切换日期 current，旧结果不覆盖。
+重启将当天既有三份输出保留到
+`/data/cms/data/index_500ms/.restarts/YYYYMMDD/<新运行时间-PID>/`，
+然后在日期目录重新生成；不再使用 runs/current。重启前已打开旧文件的消费者需要
+重新打开固定路径，并通过 status 的 `caught_up` 判断是否追平。旧布局文件保留原位。
 失败保留已写前缀，状态标记 failed。正常 stop 按华泰 FireRemaining 补完 local 普通
 网格，状态标记 stopped；exch 仍需水位/已经到期的会话定时点。盘中 stop 后的 local
 尾部只是停止状态的延续，不能当作完整交易日的实际观测。
@@ -119,10 +127,10 @@ exch 行的情况。不包含等待下一条行情或等待通道水位的时间
 不再生成 latency.csv/meta.json，避免混用此前的逐 exch 窗统计口径。
 
 ```bash
-# 日期 current 在追平后指向本次 run；启动追赶期间可从 status.sh 查看 attempt。
-tail -f /data/cms/rtf/data/index_500ms/20261013/current/latency.log
+# -F 在当天重启后重新打开固定路径；追赶状态查看 status.sh。
+tail -F /data/cms/data/index_500ms/20261014/latency.log
 python3 /data/cms/rtf/current/scripts/summarize_latency.py \
-  /data/cms/rtf/data/index_500ms/20261013/current/latency.log
+  /data/cms/data/index_500ms/20261014/latency.log
 ```
 
 统计包含 mean/P50/P95/P99/P999/max，单位全部是 ms。默认排除交易时段外的

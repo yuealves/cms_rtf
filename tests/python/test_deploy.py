@@ -16,6 +16,8 @@ from cms_rtf.catalog import INDEX_WEIGHT_DIRS
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('apply_bundle', ROOT / 'deploy/apply_bundle.py')
 apply = importlib.util.module_from_spec(spec); spec.loader.exec_module(apply)
+spec = importlib.util.spec_from_file_location('service', ROOT / 'deploy/service.py')
+service = importlib.util.module_from_spec(spec); spec.loader.exec_module(service)
 
 
 class BundleDeployTest(unittest.TestCase):
@@ -73,6 +75,27 @@ class BundleDeployTest(unittest.TestCase):
 
 
 class ServiceLifecycleTest(unittest.TestCase):
+    def test_daily_output_restart_preserves_files_and_rejects_nonfiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'index_500ms/20261014'
+            service.prepare_output(root, 'first')
+            names = ('index_500ms_exch.arrow', 'index_500ms_local.arrow', 'latency.log')
+            for name in names:
+                (root / name).write_bytes(name.encode())
+            (root / 'operator-note').write_text('keep')
+            service.prepare_output(root, 'second')
+            archive = root.parent / '.restarts/20261014/second'
+            for name in names:
+                self.assertFalse((root / name).exists())
+                self.assertEqual((archive / name).read_bytes(), name.encode())
+            self.assertEqual((root / 'operator-note').read_text(), 'keep')
+            (root / names[0]).write_bytes(b'new')
+            (root / names[1]).mkdir()
+            with self.assertRaisesRegex(RuntimeError, 'regular file'):
+                service.prepare_output(root, 'third')
+            self.assertEqual((root / names[0]).read_bytes(), b'new')
+            self.assertFalse((archive.parent / 'third').exists())
+
     def test_start_duplicate_stop_and_unrelated_pid_protection(self):
         if not hasattr(os, 'pidfd_open'):
             self.skipTest('Linux pidfd required')
@@ -92,6 +115,7 @@ class ServiceLifecycleTest(unittest.TestCase):
             (thresholds / 'threshold_20261009.csv').write_text('a,b,symbol,avg_daily_money,circ_cap\nx,x,000001,100000,1\n')
             cfg = json.loads((prefix / 'config/live.json').read_text())
             cfg['journal_root'] = str(base / 'empty-journal')
+            cfg['output_root'] = str(prefix / 'data')
             cfg['journal_clock'] = 'source'  # lifecycle test works at any wall time
             (prefix / 'config/live.json').write_text(json.dumps(cfg))
             cmd = [sys.executable, '-B', str(source / 'deploy/service.py'), '--prefix', str(prefix)]
@@ -112,6 +136,11 @@ class ServiceLifecycleTest(unittest.TestCase):
             self.assertEqual(result['last_result']['exit_code'], 0)
             self.assertEqual(result['last_result']['health']['status'], 'stopped')
             self.assertEqual(result['last_result']['health']['emitted_endpoints'], 0)
+            output = Path(first['output_dir'])
+            self.assertEqual(output.parent, prefix / 'data/index_500ms')
+            self.assertEqual(sorted(p.name for p in output.iterdir()),
+                             ['index_500ms_exch.arrow', 'index_500ms_local.arrow', 'latency.log'])
+            self.assertTrue(Path(first['attempt']).is_relative_to(prefix / 'run/history'))
             self.assertFalse(list((prefix / 'data').glob('index_500ms/*/current')))
             # A stale or forged PID record must never signal an unrelated process.
             bad = dict(first, pid=os.getpid(), start_ticks=Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(')', 1)[1].split()[19])

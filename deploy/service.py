@@ -74,6 +74,22 @@ def prepare_references(config, day, attempt):
         inputs={str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}))
 
 
+def prepare_output(root, stamp):
+    """Keep daily filenames stable and retain previous outputs on restart."""
+    root.mkdir(parents=True, exist_ok=True)
+    paths = [root / name for name in
+             ('index_500ms_exch.arrow', 'index_500ms_local.arrow', 'latency.log')]
+    for path in paths:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError('output must be a regular file: ' + str(path))
+    existing = [path for path in paths if path.exists()]
+    if existing:
+        archive = root.parent / '.restarts' / root.name / stamp
+        archive.mkdir(parents=True, exist_ok=False)
+        for path in existing:
+            path.rename(archive / path.name)
+
+
 def run_service(prefix, day):
     deployment = json.loads((SOURCE / 'build/deployment.json').read_text())
     sys.path[:0] = [str(SOURCE / 'python'), deployment['python_root']]
@@ -87,17 +103,20 @@ def run_service(prefix, day):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         stamp = datetime.datetime.now().strftime('%H%M%S') + '-' + str(os.getpid())
         root = Path(config['output_root']) / 'index_500ms' / day
-        attempt = root / 'runs' / stamp; attempt.mkdir(parents=True, exist_ok=False)
+        attempt = prefix / 'run/history' / day / stamp
+        attempt.mkdir(parents=True, exist_ok=False)
         record = dict(pid=os.getpid(), start_ticks=process_start(os.getpid()), day=day,
-                      prefix=str(prefix), source=str(SOURCE), commit=deployment['commit'], attempt=str(attempt))
+                      prefix=str(prefix), source=str(SOURCE), commit=deployment['commit'],
+                      attempt=str(attempt), output_dir=str(root))
         prepare_references(config, day, attempt)
+        prepare_output(root, stamp)
         cmd = [str(SOURCE / 'build/cms_index500ms_mt'), '--journal', str(Path(config['journal_root']) / day),
                '--journal-mode', 'follow', '--journal-clock', config.get('journal_clock', 'wall'), '--day', day,
                '--thresh', str(attempt / 'thresholds.bin'), '--ref', str(attempt / 'reference.bin'),
                '--work-dir', str(attempt), '--output-mode', 'stream', '--window-batch', '1',
                '--workers', str(config['workers']), '--pending-mib', str(config['pending_mib']),
-               '--out', str(attempt / 'index_500ms_exch.arrow'),
-               '--local-out', str(attempt / 'index_500ms_local.arrow')]
+               '--out', str(root / 'index_500ms_exch.arrow'),
+               '--local-out', str(root / 'index_500ms_local.arrow')]
         with (attempt / 'kernel.log').open('wb') as err, (attempt / 'kernel.summary.json').open('wb') as out:
             child = subprocess.Popen(cmd, stdout=out, stderr=err)
             def stop(signum, frame):
@@ -107,25 +126,12 @@ def run_service(prefix, day):
             record['kernel_pid'] = child.pid
             atomic_json(prefix / 'run/service.json', record)
             atomic_json(attempt / 'run.json', record)
-            published = False
             try:
                 while child.poll() is None:
-                    health_path = attempt / 'live-status.json'
-                    if not published and health_path.exists():
-                        health = json.loads(health_path.read_text())
-                        # Rebuild from the day's first frame on restart. Preserve
-                        # the old current output until catch-up and first publish.
-                        if health['caught_up'] and health['emitted_endpoints'] and health['status'] == 'running':
-                            temp = root / '.current.next'; temp.unlink(missing_ok=True)
-                            temp.symlink_to(attempt.relative_to(root)); temp.replace(root / 'current')
-                            published = True
                     time.sleep(.2)
                 code = child.wait()
                 health_path = attempt / 'live-status.json'
                 health = json.loads(health_path.read_text()) if health_path.exists() else {}
-                if code == 0 and not published and health.get('emitted_endpoints'):
-                    temp = root / '.current.next'; temp.unlink(missing_ok=True)
-                    temp.symlink_to(attempt.relative_to(root)); temp.replace(root / 'current')
                 atomic_json(prefix / 'run/last-result.json', dict(**record, exit_code=code, health=health))
                 return code
             finally:
