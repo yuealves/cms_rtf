@@ -74,7 +74,7 @@ APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap
 每次运行的 `references.json`，缺失或缺成分阈值直接失败。
 
 招商当前配置使用 `weights_dir=/data/shenrun/assets/index/weight`、
-`threshold_dir=/data/shenrun/163-raw-minute`、`output_root=/data/cms/data`。
+`threshold_dir=/data/shenrun/163-raw-minute`、`output_root=/data/cms/rtf/data`。
 升级保留外部配置；既有安装需要把 `output_root` 改成上述路径。
 
 ```bash
@@ -92,9 +92,9 @@ APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap
 输出为 local/exch 两个最终 Arrow stream（各 106 Float32 因子 + 两个键），没有逐股中间文件：
 
 ```
-/data/cms/data/index_500ms/YYYYMMDD/index_500ms_exch.arrow
-/data/cms/data/index_500ms/YYYYMMDD/index_500ms_local.arrow
-/data/cms/data/index_500ms/YYYYMMDD/latency.log
+/data/cms/rtf/data/index_500ms/YYYYMMDD/index_500ms_exch.arrow
+/data/cms/rtf/data/index_500ms/YYYYMMDD/index_500ms_local.arrow
+/data/cms/rtf/data/index_500ms/YYYYMMDD/latency.log
 ```
 
 每次运行的参考数据、回执、内核日志及 `live-status.json` 单独存于
@@ -103,9 +103,10 @@ APT 源、系统包数据库或系统安装。后续部署无需重复 bootstrap
 输入/迟到/中断计数、进程 RSS 峰值和状态。读取正在增长的 Arrow 时，消费者必须
 按完整 record batch 读取并等待尾部，不将暂时没有字节视为全天 EOF。
 重启将当天既有三份输出保留到
-`/data/cms/data/index_500ms/.restarts/YYYYMMDD/<新运行时间-PID>/`，
+`/data/cms/rtf/data/index_500ms/.restarts/YYYYMMDD/<新运行时间-PID>/`，
 然后在日期目录重新生成；不再使用 runs/current。重启前已打开旧文件的消费者需要
-重新打开固定路径，并通过 status 的 `caught_up` 判断是否追平。旧布局文件保留原位。
+重新打开固定路径，并通过 status 的 `caught_up` 判断是否追平。旧布局运行目录
+归档于 `/data/cms/rtf/run/legacy-layout/`，不放在每天的因子目录里。
 失败保留已写前缀，状态标记 failed。正常 stop 按华泰 FireRemaining 补完 local 普通
 网格，状态标记 stopped；exch 仍需水位/已经到期的会话定时点。盘中 stop 后的 local
 尾部只是停止状态的延续，不能当作完整交易日的实际观测。
@@ -128,9 +129,9 @@ exch 行的情况。不包含等待下一条行情或等待通道水位的时间
 
 ```bash
 # -F 在当天重启后重新打开固定路径；追赶状态查看 status.sh。
-tail -F /data/cms/data/index_500ms/20261014/latency.log
+tail -F /data/cms/rtf/data/index_500ms/20261014/latency.log
 python3 /data/cms/rtf/current/scripts/summarize_latency.py \
-  /data/cms/data/index_500ms/20261014/latency.log
+  /data/cms/rtf/data/index_500ms/20261014/latency.log
 ```
 
 统计包含 mean/P50/P95/P99/P999/max，单位全部是 ms。默认排除交易时段外的

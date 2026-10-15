@@ -115,7 +115,7 @@ class ServiceLifecycleTest(unittest.TestCase):
             (thresholds / 'threshold_20261009.csv').write_text('a,b,symbol,avg_daily_money,circ_cap\nx,x,000001,100000,1\n')
             cfg = json.loads((prefix / 'config/live.json').read_text())
             cfg['journal_root'] = str(base / 'empty-journal')
-            cfg['output_root'] = str(prefix / 'data')
+            self.assertEqual(cfg['output_root'], str(prefix / 'data'))
             cfg['journal_clock'] = 'source'  # lifecycle test works at any wall time
             (prefix / 'config/live.json').write_text(json.dumps(cfg))
             cmd = [sys.executable, '-B', str(source / 'deploy/service.py'), '--prefix', str(prefix)]

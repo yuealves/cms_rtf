@@ -142,7 +142,7 @@ def install_wrappers(prefix):
         atomic_json(config, dict(journal_root='/data/cms/data/journal',
                                 weights_dir=str(prefix / 'references/weights'),
                                 threshold_dir=str(prefix / 'references/thresholds'),
-                                output_root='/data/cms/data', workers=8, pending_mib=256))
+                                output_root=str(prefix / 'data'), workers=8, pending_mib=256))
     for command in ('start', 'stop', 'status'):
         path = prefix / 'bin' / (command + '.sh')
         body = ('#!/bin/sh\nset -eu\nexec /usr/bin/python3 -B ' +
